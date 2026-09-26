@@ -43,6 +43,12 @@ local function formatOpenAIRequest(message_history, model, options)
     request.thinking = { type = "enabled" }
     request.reasoning_effort = "high"
   end
+  -- 单次调用显式指定思考模式（优先级高于全局配置）。
+  -- 注意：deepseek-v4-flash 这类推理模型默认推理且对结构化任务可能推理到 token 耗尽，
+  -- JSON 输出类调用必须传 thinking = { type = "disabled" }，否则 content 为空（v2.0 真机实锤）。
+  if options.thinking ~= nil then
+    request.thinking = options.thinking
+  end
   local safety_limit = tonumber(options.max_tokens or CONFIGURATION.response_max_tokens)
   if safety_limit and safety_limit > 0 then request.max_tokens = safety_limit end
   if options.temperature ~= nil then request.temperature = options.temperature end

@@ -1,55 +1,27 @@
-KOAI —— Kindle KOReader AI 阅读助手
+KOAI —— Kindle KOReader AI 阅读助手（v2.7.5）
+安装说明
 
-一、这是什么
+═════════════ 这是什么 ═════════════
 
-    KOReader 上的 AI 阅读助手插件，仅支持 DeepSeek，需自备 API Key。
-    API Key 获取：到 https://platform.deepseek.com 注册并实名认证，创建 API Key 后充值（10 元即可用很久）。
+KOReader 的 AI 阅读助手插件，仅用 DeepSeek，需自备 API Key。
+获取 Key：https://platform.deepseek.com 注册 → 实名 → 创建 API Key → 充值（10 元可用很久）。
 
-  · 轻量模式（默认）＝ 划词即问即答：
-    - 5 个划词菜单：学术概念解析／英语句子翻译／人文历史解读／通用语境赏析／古文典籍解读（均可在设置里自定义或增删改）
-    - 词典弹窗左下角"KOAI 词典"
-    - 结果窗口可"追问"、可"保存为笔记"、可查看历史
-    - 启动时只加载最小模块集，待机内存占用低，不自动联网，不费 token
+两种模式，一套插件：
+· 轻量模式（默认）：划词即问即答，启动只加载最小模块，不自动联网、不费 token。
+· 精读模式（默认关）：大部头专用，读时临时打开，见《使用说明》。
 
-  · 精读模式（默认关闭）＝ 大部头名著、文献专用，临时打开：
-    - 划词自动附带"已读上下文"（基于本地采集的实际翻阅内容）+ 防剧透规则
-    - "人物／典故"划词卡片、人物关系、故事线、时间线
-    - 当前进度复盘、前序阅读状态回溯补档、全书阅读档案（可导出 Markdown）
-    - 超过 10 小时未读自动提示前情回顾
-    - 结果富文本分层显示、本地数据管理
+日常怎么用（模式切换、人物别名、常见问题等）请看同文件夹的《使用说明》。
 
-二、安装
+═════════════ 安装 ═════════════
 
-1. 设备连接电脑后，进入 koreader/plugins/ 目录；
-2. 把本文件夹里的 koai.koplugin 整个复制到 koreader/plugins/ 下；
-3. 用记事本打开 koai.koplugin/ai_query.lua，把顶部 local API_KEY = "输入API密钥" 引号里的内容替换为你自己的 DeepSeek API Key，保存；
-4. 重启 KOReader。
-   装好即用，设置里没有填 Key 的入口，日后换 Key 也改这一处即可。
+1. 设备连电脑，把本文件夹的 koai.koplugin 整个复制到 koreader/plugins/ 下；
+2. 记事本打开 koai.koplugin/ai_query.lua，把顶部 local API_KEY = "输入API密钥"
+   引号里换成自己的 Key，保存；
+3. 重启 KOReader。日后换 Key 也只改这一处。
 
-三、开关怎么用
-
-打开任意书籍 → 顶部菜单 → 工具 → "KOAI 设置" → 中部【精读模式 (KOAI): 开/关】
-  · 关（默认）：轻量模式，平时用这个，省内存省 token。搜索（放大镜）页的"KOAI 精读"菜单仍然可见——人物卡、全书档案、阅读回顾等查看类功能照常可用（纯本地读取，不调 AI）；"生成／更新复盘""前序阅读状态""本书阅读模式"等生成/采集类功能灰色禁选。
-  · 开：读大部头时打开；划词会自动带上下文并出现划词"人物／典故"按钮，翻页时自动采集已读内容（仅存本地，生成复盘才调用 AI），"KOAI 精读"菜单内全部功能可用。
-  开关即时生效，不用重启；菜单项在下次打开菜单时刷新。
-  平时建议关——开着的代价是：翻页自动采集（本地）、久读回顾提醒、划词请求附加上下文（多耗 token）。
-
-四、常见问题
-
-  · 菜单里找不到 KOAI 精读功能？→ 先把精读模式打开，再重新打开顶部菜单。
-  · 划词没反应？→ 检查网络（Kindle 需联网）；若报"API Key 无效"，说明 Key 失效或余额不足，改 ai_query.lua 顶部的 API_KEY 即可。
-  · 想改菜单/加 Prompt？→ 设置 → "划词常用菜单管理"，或把 configuration.lua 丢给 AI 让它改。
+※ 本文件夹不含任何 API Key（仅占位符）；填好 Key 的文件勿外传。
+※ 升级安装：用本文件夹的 koai.koplugin 覆盖 koreader/plugins/ 下的同名文件夹即可，
+  规则/档案/缓存都在 KOReader 数据目录里，不受影响。覆盖后必须彻底退出 KOReader
+  再重进（Lua 模块有进程缓存）。
 
 免责声明：本插件仅供学习交流，请自行遵守 DeepSeek 及模型服务商的使用条款。
-
-五、数据存储位置（v1.34 起）
-
-  · 插件设置（含 API Key 等）: koreader/settings/KOAI_settings.json
-  · 查询历史（两种模式的问答，上限 50 条）: koreader/settings/KOAI_history.json
-  · 精读模式档案（人物卡/已读采集/复盘，按书分文件夹）: koreader/data/koaireader/books/
-  · 旧文件名（aireadingassistant_*、koaireader_settings）会被自动回读迁移，可放心删除
-
-六、更新记录
-
-  · v1.34：① 新增"查询历史"回查（history_viewer.lua，懒加载，翻页零影响、零 token）；② 设置改名 KOAI_settings.json、历史改名 KOAI_history.json 并统一移入 settings/（旧路径自动兼容）；③ 历史保存新增 saveHistory 接口。
-  · v1.31：KOAI 与 AI Reading Assistant 合并为本插件。

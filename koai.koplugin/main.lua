@@ -1,7 +1,48 @@
--- KOAI main.lua（合并版 v1.34）
+-- KOAI main.lua（合并版 v2.0.9）
 -- = 轻量划词/词典（默认）+ KOAI 精读（按需开启）=
 -- v1.34：①设置/历史文件改名为 KOAI_settings.json / KOAI_history.json（自动回读旧文件）；
 -- ②新增"查询历史"回查入口（KOAI 精读菜单第一项，纯本地读取，不耗 token）。
+-- v1.35：新增"人物别名（人名替换）"功能（name_replace.lua）：
+--  ①划词入口"替换人名"：选中书中长难记人名 → 输入昵称 → 一键全书替换；
+--  ②非 EPUB 书籍：规则仍可保存，KOAI 的 AI 回答（轻量+精读）自动使用昵称；
+--  ③菜单"KOAI 精读→人物别名（替换人名）"：添加/启用/停用/删除别名、应用替换、恢复原书。
+-- v1.36：人物别名改为"写回原书"模式（PW4 上机实测后重构）：
+--  ①v1.35 的"缓存书切换"会在主页轮播产生重复封面，且关书时内存 doc_settings
+--    全量回写 sidecar 会抹掉规则（settings 回写陷阱同源）——已废弃；
+--  ②现改为：首次应用前自动备份原书到 koai_name_cache/originals/，替换版经
+--    reloadDocument 的 after_close 窗口期原子写回原书路径并重载——
+--    同一本书、同一进度、同一封面，"还原本书"随时从备份恢复；
+--  ③规则持久化修复：打开中的书直接写 ui.doc_settings（内存+flush），不再被会话回写覆盖。
+-- v1.37：人物别名体系增强：
+--  ①"合并重复人物名"（AI 归组，仅精读模式）：AI 找出书中同一人的各种叫法，
+--    一键建立批量替换规则——已有昵称自动对齐，没有昵称当场填（第二步）或留空用最简叫法；
+--  ②"应用到本书"改名"替换生效（重载本书）"，仅在有待生效规则时可用，应用成功自动隐藏；
+--  ③卡片昵称显示映射：人物与典故页中原文名显示为当前昵称（仅显示层，卡片存储不动）；
+--  ④普通模式不依赖 AI 的人名替换链路不变（划词"替换人名"→ 保存 → 替换生效）。
+-- v1.38：纠错机制简化（用户反馈："撤销上次合并"与"还原本书"概念重叠，删除前者）：
+--  ①别名列表改为按人物（昵称）分组，新增"撤销此人物的合并（删除全部别名）"；
+--  ②规则层面纠错 = 按人物撤销/启停/删条；书文件层面回退 = 只靠"还原本书"，两级不重叠。
+-- v2.0：新增"人物全文提及"（mention_scan.lua，参照 XRAY Mention Scanning）：
+--  ①纯本地扫描全书（getPageXPointer+getTextFromXPointer 逐页取文），列出某人物名
+--    出现的页码+上下文片段，点行 GotoPage 跳转（压位置栈可返回）；
+--  ②候选名 = 别名规则（原名+昵称）+ 人物卡名与别名；不调 AI、不耗 token；
+--  ③结果按书缓存（键含文件大小+修改时间，替换生效后自动失效），第二次秒开。
+-- v2.0.9：菜单与用词简化（用户反馈）：
+--  ①删除"替换生效（重载本书，仅 EPUB）"菜单：改动规则后统一弹窗询问"是否立即
+--    应用到本书并重载"，与添加别名/归组完成后的确认模式一致；
+--  ②别名列表用词重写："停用此人物全部别名"→"暂停替换此人物（规则保留，可恢复）"，
+--    "启用此人物全部别名"→"恢复替换此人物"，"撤销此人物的合并（删除全部别名）"→"删除此人物全部别名"。
+-- v2.0.4-2.0.8：AI 归组改"本地扫书 + AI 归类"架构并多轮修复（真机实证）：
+--  ①AI 不再自行发明叫法，只从本地扫描出的真实叫法清单里归类（治虚构译名）；
+--  ②扫描取文三层坑逐一实锤修复：crengine 单点 XPointer 静默返 nil → 区间取文；
+--    UnicodeToLocal 把汉字 ? 化 → EPUB 直读；Lua 捕获组不能加量词 → 字节级流式抽词；
+--  ③扫描带进度提示（每 50 页刷新）+ 诊断日志（tokens_unique/candidates 落 crash.log）。
+-- v2.0.10：人物全文提及修复（真机实证）：
+--  ①检索不到根因：findAllText 返回项没有 page 字段，页码须由 item.start(XPointer)
+--    经 getPageFromXPointer 换算（readersearch.lua:738 同款）；旧代码读 item.page
+--    恒为 nil → 结果全被丢弃 → 误报"全书没有找到"；
+--  ②合并组统一检索：按昵称+该人物全部原名叫法一起查（getPersonGroups），结果按页
+--    合并去重；选人界面按人物显示"（N 个叫法）"；缓存记录叫法集，变化自动重扫。
 -- power_mode 关（默认）：只有原 10 号插件的轻量功能，KOAI 大模块不加载、不采集、不耗 token；
 -- power_mode 开：激活 KOAI 全部能力（划词附已读上下文、人物卡、复盘、久读回顾、本地档案）。
 -- 两个原插件的相似功能已合并：划词菜单沿用 10 号的 5 槽 Prompt 体系；API 层为 DeepSeek 专用（Key 写死）。
@@ -13,6 +54,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local _ = require("gettext")
 
 local Utils = require("utils")
+local NameReplace = require("name_replace")
 
 local AIReadingAssistant = InputContainer:new {
   name = "aireadingassistant",
@@ -168,6 +210,9 @@ function AIReadingAssistant:init()
       end,
     }
   end)
+
+  -- ===== 划词入口：替换人名（人物别名，v1.35 新增，所有模式可用） =====
+  NameReplace.registerHighlightButton(self)
 end
 
 -- ============ 划词处理（轻量模式 = 10 号原逻辑） ============
@@ -194,6 +239,12 @@ function AIReadingAssistant:handlePrompt(system_prompt_override, _reader_highlig
     -- 懒加载：首次实际发起对话时才载入对话模块（含查看器/历史/请求层），轻量待机不占内存。
     local ConversationHandler = require("conversation_handler")
     local system_prompt = (system_prompt_override or "") .. "\n\n请返回纯文本，不要包含markdown格式符号"
+
+    -- v1.35：本书有人物别名时，AI 回答统一使用昵称（所有格式可用）。
+    local alias_block = NameReplace.buildAliasPromptBlock(self.ui)
+    if alias_block then
+      system_prompt = system_prompt .. "\n\n" .. alias_block
+    end
 
     local message_history = {
       { role = "system", content = system_prompt },
@@ -264,6 +315,11 @@ function AIReadingAssistant:koaiHandlePrompt(system_prompt, reader_highlight, se
     -- 精读模式统一附上防剧透规则（原 KOAI 两槽 Prompt 的核心保护，防止模型用“熟悉整本书”剧透）。
     local system_prompt_with_guard = (system_prompt or "")
         .. "\n\n【KOAI 精读规则】回答只能基于请求中提供的已读内容；小说/剧情类文本严禁提前透露尚未读到的情节、伏笔或结局。"
+    -- v1.35：本书有人物别名时，精读回答统一使用昵称。
+    local alias_block = NameReplace.buildAliasPromptBlock(self.ui)
+    if alias_block then
+      system_prompt_with_guard = system_prompt_with_guard .. "\n\n" .. alias_block
+    end
     local message_history = {
       { role = "system", content = system_prompt_with_guard },
       { role = "user", content = user_content },
@@ -501,6 +557,22 @@ function AIReadingAssistant:addToMainMenu(menu_items)
     {
       text = "人物与典故",
       callback = function() self:callCompanion("showCards", self.ui) end,
+    },
+    {
+      -- v1.39 新增：人物全文提及（参照 XRAY Mention Scanning，纯本地扫描，不耗 token）
+      text = "人物全文提及（定位出现页码）",
+      enabled_func = function() return self.ui ~= nil and self.ui.document ~= nil end,
+      callback = function()
+        local MentionScan = require("mention_scan")
+        MentionScan.show(self.ui)
+      end,
+    },
+    {
+      -- v1.35 新增：人物别名（人名替换），纯本地功能，不依赖精读模式。
+      text = "人物别名（替换人名）",
+      sub_item_table_func = function()
+        return NameReplace.getMenuItems(self.ui)
+      end,
     },
     {
       text = "故事线、人物关系与时间线",

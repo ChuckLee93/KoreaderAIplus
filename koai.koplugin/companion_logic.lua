@@ -1100,7 +1100,15 @@ end
 
 function Logic.showCards(ui)
   local book = Storage.getBookInfo(ui)
-  showText("人物与典故", Storage.formatCards(book))
+  local text = Storage.formatCards(book)
+  -- v1.37：卡片显示映射——规则里的原文名渲染成当前昵称（仅显示层，卡片存储不动）
+  pcall(function()
+    local NameReplace = require("name_replace")
+    if NameReplace and NameReplace.mapDisplayNames then
+      text = NameReplace.mapDisplayNames(ui, text)
+    end
+  end)
+  showText("人物与典故", text)
 end
 
 function Logic.showWorld(ui)
