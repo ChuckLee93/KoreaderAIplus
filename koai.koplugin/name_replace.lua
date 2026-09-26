@@ -993,6 +993,60 @@ local function scanNameCandidates(ui, on_progress)
   return out, nil, false
 end
 
+-- v2.7.5（三）：AI 提名稀有叫法的本地硬验证——解包全书逐字计数。
+-- 扫描清单只收高频词，"老卡拉马佐夫"这类出现十次上下的稀有叫法进不了
+-- 候选清单，改由 AI 按文学知识提名、此处逐字验证兜底：出现 ≥2 次才放行，
+-- 凭空捏造的写法（无论多像通行译名）一律挡在门外。验证与扫描同源
+-- （解包 → 剥标签 → 字节级 plain find），一次解包批量验证全部提名词。
+local function countWordOccurrences(original_file, words)
+  local counts = {}
+  if not original_file or not isEpub(original_file) or #words == 0 then return counts end
+  local temp_dir = extractEpub(original_file)
+  if not temp_dir then return counts end
+  local html_files = {}
+  local function collect(dir)
+    for entry in lfs.dir(dir) do
+      if entry ~= "." and entry ~= ".." then
+        local path = dir .. "/" .. entry
+        local attr = lfs.attributes(path)
+        if attr then
+          if attr.mode == "directory" then
+            collect(path)
+          elseif attr.mode == "file" and (path:match("%.x?html$") or path:match("%.xhtml$")) then
+            html_files[#html_files + 1] = path
+          end
+        end
+      end
+    end
+  end
+  collect(temp_dir)
+  table.sort(html_files)
+  local all_text = {}
+  for _, path in ipairs(html_files) do
+    local ok, text = pcall(function()
+      local f = io.open(path, "r")
+      if not f then return nil end
+      local html = f:read("*all")
+      f:close()
+      return htmlToText(html)
+    end)
+    if ok and type(text) == "string" then all_text[#all_text + 1] = text end
+  end
+  cleanupTempDir(temp_dir)
+  local full = table.concat(all_text, "\n")
+  for _, w in ipairs(words) do
+    local c, pos = 0, 1
+    while true do
+      local s = full:find(w, pos, true)
+      if not s then break end
+      c = c + 1
+      pos = s + #w
+    end
+    counts[w] = c
+  end
+  return counts
+end
+
 
 function NameReplace.showMergeNamesDialog(ui)
   if not (ui and ui.document) then return end
@@ -1038,15 +1092,19 @@ function NameReplace.showMergeNamesDialog(ui)
       .. "\n\n任务：仅从下面清单中挑出人名/称谓类词条，把书中同一人物的不同叫法归为一组"
       .. "（全名、简称、小名、称谓等），用于全书统一人名。"
       .. "\n要求："
-      .. "\n1. 只能使用清单中原样的写法，严禁创造清单外的任何叫法；译名变体必须以书内实际写法为准。"
+      .. "\n1. 优先使用清单中原样的写法；译名变体必须以书内实际写法为准。"
       .. "\n2. 注意：同一人物在不同译本中译名可能不同（如老卡拉马佐夫兄弟有荣如德译本"
       .. "「格露莘卡/斯乜尔加科夫」与其他译本「格鲁申卡/斯梅尔佳科夫」之别）。"
-      .. "清单来自对本书的逐字扫描，是本书实际写法的唯一可靠依据；"
+      .. "清单来自对本书的逐字扫描，是本书实际写法的最可靠依据；"
       .. "凡与你认知的通行译名不一致处，一律以清单为准。"
-      .. "\n3. 只报告把握很大的组合，宁漏勿错；不确定就不报。"
-      .. "\n4. 严禁把不同人物合并；同名不同人必须分开。"
-      .. "\n5. 每组给出 canonical（组内最通用的叫法，必须也在清单中）和一句话判断理由。"
-      .. "\n6. 最多 12 组，按重要程度排序。没有发现就输出 []。"
+      .. "\n3. 清单是机械扫描的结果，可能漏掉出现次数少的稀有叫法（如「老卡拉马佐夫」）。"
+      .. "对著名作品，若你确信某人物的常见叫法未入清单，可以把它加入 names——"
+      .. "系统会立即在书中逐字验证，实际出现 ≥2 次的写法才会保留，凭空捏造的会被剔除；"
+      .. "没把握就不要提。"
+      .. "\n4. 只报告把握很大的组合，宁漏勿错；不确定就不报。"
+      .. "\n5. 严禁把不同人物合并；同名不同人必须分开。"
+      .. "\n6. 每组给出 canonical（组内最通用的叫法）和一句话判断理由。"
+      .. "\n7. 最多 12 组，按重要程度排序。没有发现就输出 []。"
       .. "\n\n只输出 JSON 数组，不要任何其他文字，格式："
       .. '\n[{"names":["叫法1","叫法2"],"canonical":"最通用叫法","reason":"一句话理由"}]'
 
@@ -1087,7 +1145,7 @@ function NameReplace.showMergeNamesDialog(ui)
       --   会推理到 token 耗尽（8192 时推理 8189），content 永远为空 → 归组失败；
       -- ②不设 max_tokens 上限，沿用全局 response_max_tokens。
       return queryAI({
-        { role = "system", content = "你是严谨的中文图书人物分析助手，只输出 JSON，且只使用用户提供的清单中的词条。" },
+        { role = "system", content = "你是严谨的中文图书人物分析助手，只输出 JSON。优先使用用户清单中的词条；清单外的稀有叫法提名会被系统在书中逐字验证，捏造的将被剔除。" },
         { role = "user", content = prompt .. "\n\n书中实际出现的叫法清单（按出现频率降序）：\n" .. table.concat(candidates, "、") },
       }, { thinking = { type = "disabled" }, temperature = 0.2 })
     end)
@@ -1102,13 +1160,41 @@ function NameReplace.showMergeNamesDialog(ui)
     end
     local groups = parseGroupsFromAI(result)
     if groups and #groups > 0 then
-      -- 越界过滤：组内只保留清单中真实存在的写法（含现有规则的原名/昵称），
-      -- 不足两人的组整体丢弃——杜绝 AI 凭空发明书里不存在的译名
+      -- 越界过滤：组内只保留清单中真实存在的写法（含现有规则的原名/昵称）；
+      -- 清单外的词（AI 提名的稀有叫法，如"老卡拉马佐夫"）当场解包全书逐字
+      -- 验证，出现 ≥2 次才放行——文学知识补漏 + 本地硬验证双保险，
+      -- AI 凭空捏造的译名无论多像都进不了规则
       local allowed = {}
       for _, w in ipairs(candidates) do allowed[w] = true end
       for _, r in ipairs(rules) do
         allowed[r.original] = true
         allowed[r.nick] = true
+      end
+      local nominated = {}
+      for _, g in ipairs(groups) do
+        for _, n in ipairs(g.names or {}) do
+          if not allowed[n] and n ~= "" and utf8len(n) >= 2 then nominated[n] = true end
+        end
+        if g.canonical and g.canonical ~= "" and not allowed[g.canonical]
+            and utf8len(g.canonical) >= 2 then
+          nominated[g.canonical] = true
+        end
+      end
+      local nom_list = {}
+      for w in pairs(nominated) do nom_list[#nom_list + 1] = w end
+      if #nom_list > 0 then
+        table.sort(nom_list)
+        logger.info("KOAI NameReplace: verifying", #nom_list, "nominated:", table.concat(nom_list, "/"))
+        local ok_verify, counts = pcall(countWordOccurrences, original_file, nom_list)
+        counts = ok_verify and counts or {}
+        for _, w in ipairs(nom_list) do
+          if (counts[w] or 0) >= 2 then
+            allowed[w] = true
+            logger.info("KOAI NameReplace: nominated ok", w, "=", counts[w])
+          else
+            logger.info("KOAI NameReplace: nominated rejected", w, "=", counts[w] or 0)
+          end
+        end
       end
       local filtered = {}
       for _, g in ipairs(groups) do
