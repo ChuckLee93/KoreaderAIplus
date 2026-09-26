@@ -667,6 +667,27 @@ end
 
 -- ============ v1.37：AI 人名归组（合并重复人物名，仅精读模式） ============
 
+-- 归组数上限：已取消（2026-09-27 用户拍板"组数没必要设上限"）——组数由书决定。
+-- 历史教训一（v2.7.5）：prompt 与解析器上限不同步（prompt 12 组/解析器硬截 8），
+--   AI 按重要度排序的第 9~12 组被静默丢弃——实机"还是8组"根因。
+-- 历史教训二：12 组上限把佐西马/格里果利/彼得等真实配角挤掉——上限从来不是
+--   质量工具（防低质组靠清单验证+宁缺毋滥+称谓/父称防线），砍的反而可能是真组。
+-- 防失控正解：解析器残缺 JSON 容错——AI 输出被 max_tokens 截断时（尾部无 ]，
+--   原实现在此直接 return nil 整次归组全灭）截到最后一个完整对象补 ] 重试，
+--   救回多少组是多少。
+
+-- 残缺 JSON 容错：截到最后一个完整对象的 } 补 ] 后重试
+local function salvageJsonArray(s)
+  local last = nil
+  for k = #s, 1, -1 do
+    if s:sub(k, k) == "}" then last = k break end
+  end
+  if not last then return nil end
+  local ok, data = pcall(json.decode, s:sub(1, last) .. "]")
+  if ok and type(data) == "table" then return data end
+  return nil
+end
+
 -- 从 AI 返回文本中提取 JSON 数组并清洗
 local function parseGroupsFromAI(text)
   if type(text) ~= "string" then return nil end
@@ -676,9 +697,19 @@ local function parseGroupsFromAI(text)
   for k = #text, i, -1 do
     if text:sub(k, k) == "]" then j = k break end
   end
-  if not j or j <= i then return nil end
-  local ok, data = pcall(json.decode, text:sub(i, j))
-  if not ok or type(data) ~= "table" then return nil end
+  local ok, data
+  if j and j > i then
+    ok, data = pcall(json.decode, text:sub(i, j))
+  end
+  if not ok or type(data) ~= "table" then
+    -- 截断/畸形容错：从第一个 [ 起截到最后完整 } 补 ] 重试
+    data = salvageJsonArray(text:sub(i))
+    if data then
+      logger.info("KOAI NameReplace: AI 输出疑似被截断/畸形，容错救回组数 =", #data)
+    end
+  end
+  if type(data) ~= "table" then return nil end
+  logger.info("KOAI NameReplace: AI 返回原始组数 =", #data)
   local groups = {}
   for _, g in ipairs(data) do
     if type(g) == "table" and type(g.names) == "table" and #g.names >= 2 then
@@ -695,7 +726,6 @@ local function parseGroupsFromAI(text)
         }
       end
     end
-    if #groups >= 8 then break end
   end
   return groups
 end
@@ -734,6 +764,29 @@ local CANDIDATE_STOPWORDS = {
   ["這裡"]=true,["那裡"]=true,["這些"]=true,["那些"]=true,["不過"]=true,
   ["於是"]=true,["後來"]=true,["最後"]=true,["首先"]=true,["其次"]=true,
   ["突然"]=true,["接著"]=true,["覺得"]=true,["怎麼"]=true,["不會"]=true,
+  -- v2.7.5 称谓/泛称禁入（实机教训：清单收了"父亲/老头儿"，AI 把它们归进
+  -- 费奥多尔组，昵称回退取字节最短 → "费奥多尔·巴甫洛维奇→父亲"，第一章
+  -- 标题变"父亲·卡拉马佐夫"。称谓/泛称全书指人不定，绝不能当人物叫法；
+  -- 扫描清单与 AI 提名验证两处都拦。家庭称谓在中文书里永远是泛指高频词）
+  ["父亲"]=true,["母亲"]=true,["爸爸"]=true,["妈妈"]=true,["儿子"]=true,
+  ["女儿"]=true,["哥哥"]=true,["弟弟"]=true,["姐姐"]=true,["妹妹"]=true,
+  ["爷爷"]=true,["奶奶"]=true,["外公"]=true,["外婆"]=true,["叔叔"]=true,
+  ["伯伯"]=true,["舅舅"]=true,["姑姑"]=true,["婶婶"]=true,["孙子"]=true,
+  ["孙女"]=true,["大哥"]=true,["大姐"]=true,["老爷"]=true,["太太"]=true,
+  ["夫人"]=true,["小姐"]=true,["少爷"]=true,["大人"]=true,["先生"]=true,
+  ["老头儿"]=true,["老头子"]=true,["孩子"]=true,["小孩"]=true,["姑娘"]=true,
+  ["小伙子"]=true,["长老"]=true,["诸位"]=true,["个人"]=true,["事情"]=true,
+  ["地方"]=true,["今天"]=true,["刚才"]=true,["难道"]=true,["告诉"]=true,
+  ["相信"]=true,["明白"]=true,["亲爱"]=true,["完全"]=true,["尽管"]=true,
+  ["喜欢"]=true,["回事"]=true,["下子"]=true,["件事"]=true,
+  -- scan6："未婚妻"整词拦截 + 作为称谓前缀粘连的匹配源（"未婚妻卡捷琳娜…"）
+  ["未婚妻"]=true,
+  -- 繁体对应（与简体同形者如事情/地方/完全/相信/明白/孩子/太太/夫人/小姐已含）
+  ["父親"]=true,["母親"]=true,["兒子"]=true,["女兒"]=true,["媽媽"]=true,
+  ["爺爺"]=true,["老爺"]=true,["少爺"]=true,["老頭兒"]=true,["老頭子"]=true,
+  ["嬸嬸"]=true,["孫子"]=true,["孫女"]=true,["小夥子"]=true,["長老"]=true,
+  ["諸位"]=true,["個人"]=true,["剛才"]=true,["難道"]=true,["告訴"]=true,
+  ["親愛"]=true,["儘管"]=true,["喜歡"]=true,
 }
 
 -- v2.7.5 虚字切刀：把高频虚字/代词/助词当"切刀"，专治人名藏串漏计——
@@ -743,7 +796,11 @@ local CANDIDATE_STOPWORDS = {
 -- 费奥多尔·巴甫洛维奇 #255→#29；"阿辽沙说/我不知道/说真的"类噪声一并消灭。
 -- 刀字只收"几乎不可能出现在人名中"的字；刻意排除人名风险字：
 -- 道(道森)、向(向忠发)、同(翁同龢)、于(于连)、里(格里果利)、得(彼得)、
--- 哈(音译)、然(浩然)、刚(李刚)、才(才让)、真(淑真)、若(若曦)、来(来俊臣)。
+-- 哈(音译)、然(浩然)、刚(李刚)、才(才让)、真(淑真)、若(若曦)、来(来俊臣)、
+-- 果(格里果利 222 次——2026-09-27 实机教训："如果"拆词把老仆全名切碎，
+--   "格里"进 top30 而"格里果利"不在清单，AI 整组无从归起)、
+-- 如(婉如/如萍类人名——与"果"同构隐患；"如果/如此/如何"等泛词已移交
+--   BIGRAM_KNIFE 二元整词切，scan8)。
 local CANDIDATE_KNIFE = {
   ["的"]=true,["了"]=true,["是"]=true,["在"]=true,["和"]=true,["与"]=true,
   ["把"]=true,["被"]=true,["对"]=true,["给"]=true,["说"]=true,["问"]=true,
@@ -752,7 +809,7 @@ local CANDIDATE_KNIFE = {
   ["且"]=true,["或"]=true,["都"]=true,["还"]=true,["很"]=true,["再"]=true,
   ["只"]=true,["便"]=true,["就"]=true,["又"]=true,["也"]=true,["跟"]=true,
   ["之"]=true,["其"]=true,["此"]=true,["每"]=true,["各"]=true,["从"]=true,
-  ["由"]=true,["但"]=true,["如"]=true,["果"]=true,["不"]=true,["没"]=true,
+  ["由"]=true,["但"]=true,["不"]=true,["没"]=true,
   ["要"]=true,["我"]=true,["你"]=true,["他"]=true,["她"]=true,["它"]=true,
   ["咱"]=true,["谁"]=true,["您"]=true,["着"]=true,["过"]=true,["去"]=true,
   ["上"]=true,["时"]=true,["当"]=true,["以"]=true,["内"]=true,["至"]=true,
@@ -774,7 +831,97 @@ local CANDIDATE_KNIFE = {
   ["死"]=true,["看"]=true,["听"]=true,["走"]=true,["笑"]=true,["哭"]=true,
   ["活"]=true,["坐"]=true,["吃"]=true,["喝"]=true,["做"]=true,["拿"]=true,
   ["聽"]=true,
+  -- 2026-09-27 实机教训：称谓尾词不切导致"佐西马长老(62次)/格里果利长老/
+  -- 菲拉邦特神父(18次)"整串粘连，本名独立 token 被吃光——佐西马/格里果利
+  -- 因此从清单消失、AI 无法归组。切"长/父/神"后人名部分独立成词。
+  -- 人名风险评估：长（长孙复姓/李长歌类，本书无）、父/神（人名几乎不用）。
+  ["长"]=true,["父"]=true,["神"]=true,
 }
+
+-- 二元泛词切刀（scan8 新增）：高频泛词整词切，根治单字刀"果"式死结。
+-- 教训：为拆"如果"收单字"果"，把"格里果利"（222 次）切成"格里"+"果利"；
+-- 同构隐患"如"（婉如/如萍是人名）。方案：这些高频泛字退出单字刀，
+-- 其泛词组合在双字层整词切——泛词切得干净，人名用字永不出刀。
+-- 只需覆盖 count 可能进 top160（≥40 次）的组合；低频"果X/如X"组合
+-- 连 2 字门槛都够不着，回流无害。
+local BIGRAM_KNIFE = {
+  -- 果系
+  ["如果"]=true,["结果"]=true,["果然"]=true,["果真"]=true,["后果"]=true,
+  ["效果"]=true,["成果"]=true,["因果"]=true,["苹果"]=true,["糖果"]=true,
+  ["果子"]=true,["果敢"]=true,["果断"]=true,
+  -- 如系
+  ["如此"]=true,["如何"]=true,["比如"]=true,["例如"]=true,["假如"]=true,
+  ["犹如"]=true,["譬如"]=true,["一如"]=true,["如同"]=true,["如实"]=true,
+  ["如下"]=true,["如上"]=true,["如愿"]=true,["如常"]=true,["如期"]=true,
+  -- 称谓整词切：单字刀"父/长"会拆"父亲/长老"使粘连串换头漏网
+  -- （实机教训："亲费奥多尔·巴甫洛维奇"——"父"切后"亲"打头绕过前缀检查）
+  ["父亲"]=true,["母亲"]=true,["儿子"]=true,["女儿"]=true,["老仆"]=true,
+  -- 繁体对应（简繁同形词已含在上两行，此处补特有字形）
+  ["結果"]=true,["後果"]=true,["蘋果"]=true,
+}
+
+-- 长词新档首尾洗刀扩充表（2026-09-27，配合三档长词通道）：
+-- 三档新档（≥8字≥2次 / 6~7字≥8次）全量复算实证：136 净增词过半是
+-- "伊万·费奥多罗维奇勃然大怒"（粘尾）、"到卡捷琳娜·伊万诺夫娜"（带头）类噪声。
+-- 洗刀逻辑：候选串首字命中 HEAD_KNIFE_EXTRA 或末字命中 TAIL_KNIFE_EXTRA 即拒收
+-- （仅作用于 ≥6 字新档；top160 与 4~5 字老档不洗，防"彼得/华生"类误杀回归）。
+-- CANDIDATE_KNIFE 刻意排除的人名风险字（道/向/同/于/里/得/哈/然/刚/才/真/若/来）
+-- 在中部出现合法（格里果利/彼得/道森），但首尾出现即整个人名串不成立，故入尾刀。
+-- 注意："老/父"只入尾刀不入首刀——"老卡拉马佐夫"首字是"老"，必须保留。
+local HEAD_KNIFE_EXTRA = {
+  ["白"]=true,["地"]=true,["位"]=true,["个"]=true,["怕"]=true,["指"]=true,
+  ["面"]=true,["访"]=true,["仆"]=true,["令"]=true,["次"]=true,["弟"]=true,
+  ["依"]=true,["担"]=true,["妻"]=true,["两"]=true,["到"]=true,
+  -- 二轮复算补充（6+ 字首位置无合法人名；"于连/利玛窦"等 2~3 字不受影响，
+  -- 它们走 top160 与 4~5 字老档）：
+  ["未"]=true,["家"]=true,["长"]=true,["二"]=true,["利"]=true,
+  ["于"]=true,["圣"]=true,
+}
+local TAIL_KNIFE_EXTRA = {
+  ["续"]=true,["微"]=true,["重"]=true,["怒"]=true,["作"]=true,["声"]=true,
+  ["爱"]=true,["人"]=true,["天"]=true,["样"]=true,["语"]=true,["久"]=true,
+  ["取"]=true,["家"]=true,["马"]=true,["长"]=true,["平"]=true,["录"]=true,
+  ["任"]=true,["饼"]=true,["栈"]=true,["站"]=true,["立"]=true,["到"]=true,
+  ["出"]=true,["乎"]=true,["总"]=true,["经"]=true,["已"]=true,["回"]=true,
+  ["毫"]=true,["乐"]=true,["生"]=true,["姐"]=true,["父"]=true,["老"]=true,
+  ["道"]=true,["向"]=true,["同"]=true,["于"]=true,["里"]=true,["得"]=true,
+  ["哈"]=true,["然"]=true,["刚"]=true,["才"]=true,["真"]=true,["若"]=true,
+  ["来"]=true,
+  -- 二轮复算补充（6+ 字尾位置无合法人名）：
+  ["地"]=true,["干"]=true,["脸"]=true,["记"]=true,
+}
+
+-- 运行时合并：首刀/尾刀 = CANDIDATE_KNIFE 全集 ∪ 各自扩充
+local HEAD_KNIFE, TAIL_KNIFE = {}, {}
+for k in pairs(CANDIDATE_KNIFE) do HEAD_KNIFE[k] = true; TAIL_KNIFE[k] = true end
+for k in pairs(HEAD_KNIFE_EXTRA) do HEAD_KNIFE[k] = true end
+for k in pairs(TAIL_KNIFE_EXTRA) do TAIL_KNIFE[k] = true end
+
+-- 取 UTF-8 串的首/末单字（字节截取，兼容 1~4 字节与 ·(2字节)）
+local function utf8_head_tail(w)
+  local n = #w
+  if n == 0 then return "", "" end
+  local b1 = w:byte(1)
+  local hlen = (b1 >= 0xF0 and 4) or (b1 >= 0xE0 and 3) or (b1 >= 0xC0 and 2) or 1
+  if hlen > n then hlen = n end
+  local blen = 1
+  while blen < n do
+    local b = w:byte(n - blen + 1)
+    if b >= 0xC0 then break end
+    blen = blen + 1
+  end
+  return w:sub(1, hlen), w:sub(n - blen + 1)
+end
+
+-- 称谓前缀粘连检查：候选串以任一停用词（父亲/老头儿/未婚妻…）开头
+-- 说明是"称谓+人名"粘连串（"父亲费奥多尔·巴甫洛维奇"），拒收。
+-- "老卡拉马佐夫"不受影响——"老"本身不是停用词（"老头儿"才是）。
+local function startsWithStopword(s)
+  for w in pairs(CANDIDATE_STOPWORDS) do
+    if s:sub(1, #w) == w then return true end
+  end
+  return false
+end
 
 -- on_progress(done, total)：可选进度回调，用于扫描时刷新提示文字
 --
@@ -823,7 +970,7 @@ local function scanNameCandidates(ui, on_progress)
     local attr = lfs.attributes(file)
     if attr then
       -- |scan3：扫描器算法版本——v2.7.5 引入虚字切刀与长词补充后必须作废旧缓存
-      cache_file = scan_cache_dir .. "/" .. md5(file .. "|" .. tostring(attr.size or 0) .. "|" .. tostring(attr.modification or 0) .. "|scan3"):sub(1, 16) .. ".json"
+      cache_file = scan_cache_dir .. "/" .. md5(file .. "|" .. tostring(attr.size or 0) .. "|" .. tostring(attr.modification or 0) .. "|scan8"):sub(1, 16) .. ".json"
       local f = io.open(cache_file, "r")
       if f then
         local content = f:read("*all")
@@ -917,6 +1064,22 @@ local function scanNameCandidates(ui, on_progress)
     if isLead(b) then
       local b2, b3 = full:byte(i + 1), full:byte(i + 2)
     if b2 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF then
+      -- scan8 二元泛词切刀：先试 2 汉字整词（如果/结果/如此/如何…），
+      -- 命中整词切——泛词高频字（果/如）与人名用字的冲突在双字层终结
+      local cut = false
+      local b4 = full:byte(i + 3)
+      if isLead(b4) then
+        local b5, b6 = full:byte(i + 4), full:byte(i + 5)
+        if b5 and b5 >= 0x80 and b5 <= 0xBF and b6 and b6 >= 0x80 and b6 <= 0xBF then
+          local two = full:sub(i, i + 5)
+          if BIGRAM_KNIFE[two] then
+            flush()
+            i = i + 6
+            cut = true
+          end
+        end
+      end
+      if not cut then
       local ch = full:sub(i, i + 2)
       if CANDIDATE_KNIFE[ch] then
         -- v2.7.5 虚字切刀：当前词在此断开（刀字自身不入频，单字过不了 ≥2 过滤）。
@@ -931,6 +1094,7 @@ local function scanNameCandidates(ui, on_progress)
         flush()
         cur, cur_e = ch, i + 2
         i = i + 3
+      end
       end
     else
       flush()
@@ -969,11 +1133,34 @@ local function scanNameCandidates(ui, on_progress)
   local picked = {}
   local n_top = math.min(#candidates, 160)
   for i = 1, n_top do picked[#picked + 1] = candidates[i] end
+  -- 长词通道按长度分级（v2.7.5 实机教训：全名"费奥多尔·巴甫洛维奇·卡拉马佐夫"
+  -- 11 次、通称"老卡拉马佐夫"10 次，都差 1 次够不着 12 次门槛；而 AI 提名通道
+  -- 两轮实测一次都没用——指望 AI 自觉不靠谱，超长串本地确定性收录）：
+  --   ≥8 字 且 ≥2 次（超长串避开全部刀字几乎必然是人名全名/固定称谓）
+  --   6~7 字 且 ≥8 次
+  --   4~5 字 且 ≥12 次（原门槛）
+  local washed_cnt = 0
   for i = n_top + 1, #candidates do
     local c = candidates[i]
-    if utf8len(c.name) >= 4 and c.count >= 12 then
-      picked[#picked + 1] = c
+    local L = utf8len(c.name)
+    -- 6~7 字档门槛 8→6（2026-09-27 复算教训："老卡拉马佐夫"token 频次 6——
+    -- plain 10 次中 4 处前字非刀被粘连成更长串；有首尾洗刀兜底，放低不脏）
+    if (L >= 8 and c.count >= 2) or (L >= 6 and c.count >= 6) or (L >= 4 and c.count >= 12) then
+      -- 首尾洗刀+称谓前缀粘连只作用于 ≥6 字新档两档；4~5 字老档与 top160 不洗防回归
+      local washed = false
+      if L >= 6 then
+        local h, t = utf8_head_tail(c.name)
+        if HEAD_KNIFE[h] or TAIL_KNIFE[t] or startsWithStopword(c.name) then washed = true end
+      end
+      if washed then
+        washed_cnt = washed_cnt + 1
+      else
+        picked[#picked + 1] = c
+      end
     end
+  end
+  if washed_cnt > 0 then
+    logger.info("KOAI NameReplace: 长词首尾洗刀剔除 =", washed_cnt)
   end
   while #picked > 240 do table.remove(picked) end
   local out = {}
@@ -1089,22 +1276,31 @@ function NameReplace.showMergeNamesDialog(ui)
   end)
 
   local prompt = table.concat(context_lines, "\n")
-      .. "\n\n任务：仅从下面清单中挑出人名/称谓类词条，把书中同一人物的不同叫法归为一组"
-      .. "（全名、简称、小名、称谓等），用于全书统一人名。"
+      .. "\n\n任务：仅从下面清单中挑出人名词条，把书中同一人物的不同叫法归为一组"
+      .. "（全名、简称、小名、外号），用于全书统一人名。"
       .. "\n要求："
       .. "\n1. 优先使用清单中原样的写法；译名变体必须以书内实际写法为准。"
       .. "\n2. 注意：同一人物在不同译本中译名可能不同（如老卡拉马佐夫兄弟有荣如德译本"
       .. "「格露莘卡/斯乜尔加科夫」与其他译本「格鲁申卡/斯梅尔佳科夫」之别）。"
       .. "清单来自对本书的逐字扫描，是本书实际写法的最可靠依据；"
       .. "凡与你认知的通行译名不一致处，一律以清单为准。"
-      .. "\n3. 清单是机械扫描的结果，可能漏掉出现次数少的稀有叫法（如「老卡拉马佐夫」）。"
-      .. "对著名作品，若你确信某人物的常见叫法未入清单，可以把它加入 names——"
-      .. "系统会立即在书中逐字验证，实际出现 ≥2 次的写法才会保留，凭空捏造的会被剔除；"
-      .. "没把握就不要提。"
+      .. "\n3. 清单是机械扫描的结果，可能漏掉出现次数少的稀有叫法。"
+      .. "若你确信某写法在书中确实出现，可以把它加入 names 提名——"
+      .. "系统会立即在书中逐字验证，实际出现 ≥2 次的写法才会保留，凭空捏造的会被剔除。"
+      .. "值得提名的：著名人物的通称（如「老卡拉马佐夫」）、完整全名"
+      .. "（名+父称+姓，如「费奥多尔·巴甫洛维奇·卡拉马佐夫」）、"
+      .. "清单漏收的简称+父称组合变体（如「米嘉·费奥多罗维奇」——简称与父称"
+      .. "各自常见但连用少见，机械清单常漏）以及小名与外号。"
       .. "\n4. 只报告把握很大的组合，宁漏勿错；不确定就不报。"
       .. "\n5. 严禁把不同人物合并；同名不同人必须分开。"
-      .. "\n6. 每组给出 canonical（组内最通用的叫法）和一句话判断理由。"
-      .. "\n7. 最多 12 组，按重要程度排序。没有发现就输出 []。"
+      .. "\n6. 严禁把称谓/泛称当人物叫法：「父亲/母亲/儿子/老头儿/老爷/太太/长老」这类"
+      .. "词全书指人不定，绝不能入组——哪怕你确信书里这个词指的就是某人。"
+      .. "\n7. 父子、兄弟、同族是不同人物，严禁混入同组（如上尉与其子）；"
+      .. "父称（…维奇/…夫娜）只属于对应名字的人物，不得单独成组或张冠李戴。"
+      .. "\n8. 每组给出 canonical（组内最通用的叫法）和一句话判断理由。"
+      .. "\n9. 组数不设上限，按重要程度排序，值得归的都归——主要人物之外，"
+      .. "反复出现的次要配角（长老、仆人、军官、官员、孩子、房东、神父等）"
+      .. "也要归组；但宁缺毋滥，没有把握的人物不要硬凑。没有发现就输出 []。"
       .. "\n\n只输出 JSON 数组，不要任何其他文字，格式："
       .. '\n[{"names":["叫法1","叫法2"],"canonical":"最通用叫法","reason":"一句话理由"}]'
 
@@ -1159,6 +1355,7 @@ function NameReplace.showMergeNamesDialog(ui)
       return
     end
     local groups = parseGroupsFromAI(result)
+    logger.info("KOAI NameReplace: 解析有效组数 =", groups and #groups or 0)
     if groups and #groups > 0 then
       -- 越界过滤：组内只保留清单中真实存在的写法（含现有规则的原名/昵称）；
       -- 清单外的词（AI 提名的稀有叫法，如"老卡拉马佐夫"）当场解包全书逐字
@@ -1170,15 +1367,24 @@ function NameReplace.showMergeNamesDialog(ui)
         allowed[r.original] = true
         allowed[r.nick] = true
       end
-      local nominated = {}
+      local nominated, banned = {}, {}
       for _, g in ipairs(groups) do
         for _, n in ipairs(g.names or {}) do
-          if not allowed[n] and n ~= "" and utf8len(n) >= 2 then nominated[n] = true end
+          if not allowed[n] and n ~= "" and utf8len(n) >= 2 then
+            -- 称谓/泛称（父亲/老头儿/老爷…）出现次数必然 ≥2，计数验证拦不住，
+            -- 在此直接拒绝——AI 提名也进不了规则
+            if CANDIDATE_STOPWORDS[n] then banned[#banned + 1] = n
+            else nominated[n] = true end
+          end
         end
         if g.canonical and g.canonical ~= "" and not allowed[g.canonical]
             and utf8len(g.canonical) >= 2 then
-          nominated[g.canonical] = true
+          if CANDIDATE_STOPWORDS[g.canonical] then banned[#banned + 1] = g.canonical
+          else nominated[g.canonical] = true end
         end
+      end
+      if #banned > 0 then
+        logger.info("KOAI NameReplace: 称谓/泛称提名拦截:", table.concat(banned, "/"))
       end
       local nom_list = {}
       for w in pairs(nominated) do nom_list[#nom_list + 1] = w end
@@ -1196,17 +1402,48 @@ function NameReplace.showMergeNamesDialog(ui)
           end
         end
       end
+      -- 父称防线（v2.7.5 实机教训：AI 把纯父称词张冠李戴——"帕尔菲诺维奇→
+      -- 斯乜尔加科夫""伊格纳启耶夫娜→莉兹"。父称词只有当组内存在以其结尾
+      -- 或开头的完整名时才保留，否则剔除——宁漏勿错。对无父称的中文书零影响）
+      -- 2026-09-27 二次实机教训：旧版把"名+父称"（含·，如 费奥多尔·巴甫洛维奇/
+      -- 卡捷琳娜·伊万诺夫娜）也当父称杀——16 词误剔、320 次的"费奥多尔·
+      -- 巴甫洛维奇"全书没被替换。现只拦"纯父称"（不含·，如 帕尔菲诺维奇/伊里奇），
+      -- 且对应名检查改为前缀或后缀双向（伊里奇←彼得·伊里奇；费尧多罗维奇←
+      -- 费尧多罗维奇·卡拉马佐夫）。
+      local function isPatronymic(w)
+        if w:find("·", 1, true) then return false end
+        return utf8len(w) >= 3 and (w:match("维奇$") or w:match("夫娜$")
+          or w:match("芙娜$") or w:match("耶芙娜$") or w:match("叶芙娜$")
+          or w:match("伊里奇$"))
+      end
       local filtered = {}
       for _, g in ipairs(groups) do
         local kept = {}
         for _, n in ipairs(g.names or {}) do
           if allowed[n] then kept[#kept + 1] = n end
         end
+        local final = {}
+        for _, n in ipairs(kept) do
+          if isPatronymic(n) then
+            local hasFull = false
+            for _, m in ipairs(kept) do
+              if m ~= n and #m > #n
+                and (m:sub(-#n) == n or m:sub(1, #n) == n) then hasFull = true break end
+            end
+            if not hasFull then
+              logger.info("KOAI NameReplace: 父称无对应全名同组，剔除:", n)
+              n = nil
+            end
+          end
+          if n then final[#final + 1] = n end
+        end
+        kept = final
         if #kept >= 2 then
           filtered[#filtered + 1] = { names = kept, canonical = allowed[g.canonical] and g.canonical or kept[1], reason = g.reason or "" }
         end
       end
       groups = filtered
+      logger.info("KOAI NameReplace: 清单过滤后组数 =", #groups)
     end
     if not groups or #groups == 0 then
       UIManager:show(InfoMessage:new {
@@ -1241,9 +1478,12 @@ function NameReplace.showMergeNamesDialog(ui)
           end
           if not target then
             target = g.canonical ~= "" and g.canonical or g.names[1]
+            -- 称谓/泛称不得当选昵称（双保险：清单已停用，这里防 AI 提名漏网）
+            if CANDIDATE_STOPWORDS[target] then target = nil end
             for _, n in ipairs(g.names) do
-              if #n < #target then target = n end
+              if not CANDIDATE_STOPWORDS[n] and (not target or #n < #target) then target = n end
             end
+            target = target or g.canonical or g.names[1]
           end
         end
         for _, n in ipairs(g.names) do
