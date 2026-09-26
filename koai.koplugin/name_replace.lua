@@ -173,25 +173,15 @@ end
 local function saveRules(ui, original_file, rules, key)
   key = key or RULES_KEY
   if not original_file then return end
-  local n = type(rules) == "table" and #rules or -1
-  logger.info("KOAI NameReplace: saveRules key=", key, " n=", n,
-    " curDoc=", tostring(isCurrentDocument(ui, original_file)),
-    " docFile=", tostring(ui and ui.document and ui.document.file),
-    " origFile=", tostring(original_file))
   if isCurrentDocument(ui, original_file) and ui.doc_settings then
     ui.doc_settings:saveSetting(key, rules)
-    local fok, ferr = pcall(function() ui.doc_settings:flush() end)
-    logger.info("KOAI NameReplace: flush(curDoc) ok=", tostring(fok), ferr and tostring(ferr) or "")
+    pcall(function() ui.doc_settings:flush() end)
     return
   end
   local ok, settings = pcall(function() return DocSettings:open(original_file) end)
-  if not ok or not settings then
-    logger.warn("KOAI NameReplace: saveRules DocSettings open failed")
-    return
-  end
+  if not ok or not settings then return end
   settings:saveSetting(key, rules)
-  local fok, ferr = pcall(function() settings:flush() end)
-  logger.info("KOAI NameReplace: flush(disk) ok=", tostring(fok), ferr and tostring(ferr) or "")
+  pcall(function() settings:flush() end)
 end
 
 -- ============ 模式判断 ============
@@ -735,6 +725,55 @@ local CANDIDATE_STOPWORDS = {
   ["人们"]=true,["他的"]=true,["她的"]=true,["我的"]=true,["你的"]=true,
   ["这里"]=true,["那里"]=true,["哪里"]=true,["这些"]=true,["那些"]=true,
   ["不过"]=true,["然而"]=true,["于是"]=true,["那么"]=true,["怎么"]=true,
+  ["后来"]=true,["最后"]=true,["首先"]=true,["其次"]=true,["突然"]=true,
+  ["接着"]=true,
+  -- 繁体对应（代词类如"我們/他們"因"們"是切刀自动碎掉，无需列）
+  ["這個"]=true,["那個"]=true,["什麼"]=true,["沒有"]=true,["一個"]=true,
+  ["知道"]=true,["現在"]=true,["時候"]=true,["因為"]=true,["所以"]=true,
+  ["還是"]=true,["這樣"]=true,["那樣"]=true,["已經"]=true,["應該"]=true,
+  ["這裡"]=true,["那裡"]=true,["這些"]=true,["那些"]=true,["不過"]=true,
+  ["於是"]=true,["後來"]=true,["最後"]=true,["首先"]=true,["其次"]=true,
+  ["突然"]=true,["接著"]=true,["覺得"]=true,["怎麼"]=true,["不會"]=true,
+}
+
+-- v2.7.5 虚字切刀：把高频虚字/代词/助词当"切刀"，专治人名藏串漏计——
+-- 中文无分词，"在佐西马长老的灵柩旁"这类长汉字段在旧扫描中整体成词，
+-- 藏在中间的人名（佐西马长老/老卡拉马佐夫）频次永远为 0，进不了候选清单。
+-- 卡拉马佐夫兄弟实测：格露莘卡 #172→#8、斯乜尔加科夫 #112→#13、
+-- 费奥多尔·巴甫洛维奇 #255→#29；"阿辽沙说/我不知道/说真的"类噪声一并消灭。
+-- 刀字只收"几乎不可能出现在人名中"的字；刻意排除人名风险字：
+-- 道(道森)、向(向忠发)、同(翁同龢)、于(于连)、里(格里果利)、得(彼得)、
+-- 哈(音译)、然(浩然)、刚(李刚)、才(才让)、真(淑真)、若(若曦)、来(来俊臣)。
+local CANDIDATE_KNIFE = {
+  ["的"]=true,["了"]=true,["是"]=true,["在"]=true,["和"]=true,["与"]=true,
+  ["把"]=true,["被"]=true,["对"]=true,["给"]=true,["说"]=true,["问"]=true,
+  ["想"]=true,["见"]=true,["找"]=true,["让"]=true,["叫"]=true,["喊"]=true,
+  ["答"]=true,["这"]=true,["那"]=true,["哪"]=true,["却"]=true,["而"]=true,
+  ["且"]=true,["或"]=true,["都"]=true,["还"]=true,["很"]=true,["再"]=true,
+  ["只"]=true,["便"]=true,["就"]=true,["又"]=true,["也"]=true,["跟"]=true,
+  ["之"]=true,["其"]=true,["此"]=true,["每"]=true,["各"]=true,["从"]=true,
+  ["由"]=true,["但"]=true,["如"]=true,["果"]=true,["不"]=true,["没"]=true,
+  ["要"]=true,["我"]=true,["你"]=true,["他"]=true,["她"]=true,["它"]=true,
+  ["咱"]=true,["谁"]=true,["您"]=true,["着"]=true,["过"]=true,["去"]=true,
+  ["上"]=true,["时"]=true,["当"]=true,["以"]=true,["内"]=true,["至"]=true,
+  ["自"]=true,["因"]=true,["将"]=true,["为"]=true,["替"]=true,["帮"]=true,
+  ["遇"]=true,["正"]=true,["请"]=true,["会"]=true,["使"]=true,["一"]=true,
+  ["第"]=true,["们"]=true,["等"]=true,["什"]=true,["么"]=true,["吗"]=true,
+  ["呢"]=true,["吧"]=true,["嘛"]=true,["嗯"]=true,["呀"]=true,["哦"]=true,
+  ["哇"]=true,["太"]=true,["更"]=true,["最"]=true,["挺"]=true,["可"]=true,
+  ["故"]=true,["乃"]=true,["竟"]=true,["确"]=true,["像"]=true,["似"]=true,
+  ["倘"]=true,["虽"]=true,["则"]=true,["纵"]=true,["所"]=true,["现"]=true,
+  -- 繁体对应（本插件仅服务简繁中文用户）：說問這還從們麼嗎…与简体同效
+  ["與"]=true,["對"]=true,["給"]=true,["說"]=true,["問"]=true,["讓"]=true,
+  ["見"]=true,["這"]=true,["卻"]=true,["還"]=true,["從"]=true,["沒"]=true,
+  ["誰"]=true,["著"]=true,["過"]=true,["時"]=true,["當"]=true,["內"]=true,
+  ["將"]=true,["為"]=true,["幫"]=true,["請"]=true,["會"]=true,["們"]=true,
+  ["麼"]=true,["嗎"]=true,["確"]=true,["雖"]=true,["則"]=true,["縱"]=true,
+  ["現"]=true,["裡"]=true,["裏"]=true,["隻"]=true,["及"]=true,
+  -- 高频粘刀动词（0% 人名风险；"老卡拉马佐夫死了"若缺"死"会被粘成"老卡拉马佐夫死"）
+  ["死"]=true,["看"]=true,["听"]=true,["走"]=true,["笑"]=true,["哭"]=true,
+  ["活"]=true,["坐"]=true,["吃"]=true,["喝"]=true,["做"]=true,["拿"]=true,
+  ["聽"]=true,
 }
 
 -- on_progress(done, total)：可选进度回调，用于扫描时刷新提示文字
@@ -783,7 +822,8 @@ local function scanNameCandidates(ui, on_progress)
   if file then
     local attr = lfs.attributes(file)
     if attr then
-      cache_file = scan_cache_dir .. "/" .. md5(file .. "|" .. tostring(attr.size or 0) .. "|" .. tostring(attr.modification or 0)):sub(1, 16) .. ".json"
+      -- |scan3：扫描器算法版本——v2.7.5 引入虚字切刀与长词补充后必须作废旧缓存
+      cache_file = scan_cache_dir .. "/" .. md5(file .. "|" .. tostring(attr.size or 0) .. "|" .. tostring(attr.modification or 0) .. "|scan3"):sub(1, 16) .. ".json"
       local f = io.open(cache_file, "r")
       if f then
         local content = f:read("*all")
@@ -876,21 +916,27 @@ local function scanNameCandidates(ui, on_progress)
     local b = full:byte(i)
     if isLead(b) then
       local b2, b3 = full:byte(i + 1), full:byte(i + 2)
-      if b2 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF then
-        local ch = full:sub(i, i + 2)
-        if cur and i == cur_e + 1 then
-          -- 相邻汉字：拼进当前词
-          cur, cur_e = cur .. ch, i + 2
-        else
-          flush()
-          cur, cur_e = ch, i + 2
-        end
+    if b2 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF then
+      local ch = full:sub(i, i + 2)
+      if CANDIDATE_KNIFE[ch] then
+        -- v2.7.5 虚字切刀：当前词在此断开（刀字自身不入频，单字过不了 ≥2 过滤）。
+        -- "在佐西马长老的灵柩旁" → 在|佐西马长老|的|灵柩旁，藏串人名得以独立成词
+        flush()
+        i = i + 3
+      elseif cur and i == cur_e + 1 then
+        -- 相邻汉字：拼进当前词
+        cur, cur_e = cur .. ch, i + 2
         i = i + 3
       else
         flush()
-        i = i + 1
+        cur, cur_e = ch, i + 2
+        i = i + 3
       end
-    elseif cur and b == 0xC2 and full:byte(i + 1) == 0xB7
+    else
+      flush()
+      i = i + 1
+    end
+  elseif cur and b == 0xC2 and full:byte(i + 1) == 0xB7
         and i == cur_e + 1 and isLead(full:byte(i + 2)) then
       -- 紧跟当前词的 ·，且后面是汉字（前瞻，防句尾 · 污染）：并入当前词
       cur, cur_e = cur .. DOT, i + 1
@@ -915,10 +961,23 @@ local function scanNameCandidates(ui, on_progress)
     if a.count ~= b.count then return a.count > b.count end
     return a.name < b.name
   end)
-  -- 上限 160 条（控制 prompt 体积在 1K token 量级）
-  while #candidates > 160 do table.remove(candidates) end
+  -- v2.7.5 双通道入选（译本无关，纯本地统计）：
+  -- ①频次 top-160：短词多噪声，阈值高（卡拉马佐夫实测边界 count≈40）；
+  -- ②长词补充：4 字以上且 ≥12 次者无视 top160 直接入选——中文里 4 字以上
+  --   连续共现是强人名信号（佐西马长老/费奥多尔·巴甫洛维奇/伊波里特·基里洛维奇），
+  --   按频次排序常被高频对话词挤出前 160。总上限 240 条（约 0.5K token）。
+  local picked = {}
+  local n_top = math.min(#candidates, 160)
+  for i = 1, n_top do picked[#picked + 1] = candidates[i] end
+  for i = n_top + 1, #candidates do
+    local c = candidates[i]
+    if utf8len(c.name) >= 4 and c.count >= 12 then
+      picked[#picked + 1] = c
+    end
+  end
+  while #picked > 240 do table.remove(picked) end
   local out = {}
-  for _, c in ipairs(candidates) do out[#out + 1] = c.name end
+  for _, c in ipairs(picked) do out[#out + 1] = c.name end
 
   logger.info("KOAI NameReplace: scan candidates=", #out)
   if cache_file and #out > 0 then
@@ -980,10 +1039,14 @@ function NameReplace.showMergeNamesDialog(ui)
       .. "（全名、简称、小名、称谓等），用于全书统一人名。"
       .. "\n要求："
       .. "\n1. 只能使用清单中原样的写法，严禁创造清单外的任何叫法；译名变体必须以书内实际写法为准。"
-      .. "\n2. 只报告把握很大的组合，宁漏勿错；不确定就不报。"
-      .. "\n3. 严禁把不同人物合并；同名不同人必须分开。"
-      .. "\n4. 每组给出 canonical（组内最通用的叫法，必须也在清单中）和一句话判断理由。"
-      .. "\n5. 最多 8 组，按重要程度排序。没有发现就输出 []。"
+      .. "\n2. 注意：同一人物在不同译本中译名可能不同（如老卡拉马佐夫兄弟有荣如德译本"
+      .. "「格露莘卡/斯乜尔加科夫」与其他译本「格鲁申卡/斯梅尔佳科夫」之别）。"
+      .. "清单来自对本书的逐字扫描，是本书实际写法的唯一可靠依据；"
+      .. "凡与你认知的通行译名不一致处，一律以清单为准。"
+      .. "\n3. 只报告把握很大的组合，宁漏勿错；不确定就不报。"
+      .. "\n4. 严禁把不同人物合并；同名不同人必须分开。"
+      .. "\n5. 每组给出 canonical（组内最通用的叫法，必须也在清单中）和一句话判断理由。"
+      .. "\n6. 最多 12 组，按重要程度排序。没有发现就输出 []。"
       .. "\n\n只输出 JSON 数组，不要任何其他文字，格式："
       .. '\n[{"names":["叫法1","叫法2"],"canonical":"最通用叫法","reason":"一句话理由"}]'
 
@@ -1315,6 +1378,54 @@ local function buildRulesList(ui)
   end
 
   local items = {}
+  -- v2.7.5：全局批量删除（用户反馈逐个人物删太麻烦）。
+  -- 放列表首位 + 分隔线；应用是"从原书备份重建"式，删空规则再应用 = 全书恢复原文
+  table.insert(items, {
+    text = "删除所有人物全部别名",
+    separator = true,
+    callback = function()
+      local rules_now = loadRules(ui, original_file)
+      if #rules_now == 0 then
+        UIManager:show(InfoMessage:new { text = "当前没有任何别名规则。", timeout = 4 })
+        return
+      end
+      local persons = {}
+      local any_enabled = false
+      for _, r in ipairs(rules_now) do
+        persons[r.nick ~= "" and r.nick or r.original] = true
+        if r.enabled then any_enabled = true end
+      end
+      UIManager:show(ConfirmBox:new {
+        text = "删除本书全部别名？\n共 " .. #rules_now .. " 条规则、"
+            .. (function()
+              local n = 0
+              for _ in pairs(persons) do n = n + 1 end
+              return n
+            end)() .. " 个人物。"
+            .. (any_enabled
+                and "\n\n删除后请点\"立即应用\"重载：全书所有人名恢复原文。"
+                or  "\n\n当前所有规则均为停用状态，正文本就未替换，删除后无需重新应用。"),
+        ok_text = "全部删除",
+        ok_callback = function()
+          -- 以落盘实时状态再判定（菜单快照可能过期），与"删除此人物"同策略
+          local latest = loadRules(ui, original_file)
+          local still_enabled = false
+          for _, r in ipairs(latest) do
+            if r.enabled then still_enabled = true break end
+          end
+          saveRules(ui, original_file, {})
+          if still_enabled then
+            offerApplyAfterRuleChange(ui, original_file)
+          else
+            UIManager:show(InfoMessage:new {
+              text = "已删除全部别名规则。",
+              timeout = 4,
+            })
+          end
+        end,
+      })
+    end,
+  })
   for _, key in ipairs(order) do
     local person = persons[key]
     local originals = {}
@@ -1427,8 +1538,6 @@ local function buildRulesList(ui)
                 ok_text = "删除",
                 ok_callback = function()
                   local rules_now = loadRules(ui, original_file)
-                  logger.info("KOAI NameReplace: delete-one requested original=", tostring(rule.original),
-                    " rules_now=", #rules_now, " curDoc=", tostring(isCurrentDocument(ui, original_file)))
                   local was_enabled = false
                   local kept = {}
                   for _, r in ipairs(rules_now) do
