@@ -1,11 +1,11 @@
 # KoreaderAIplus — KOReader AI 阅读助手 / AI Reading Assistant
 
-KOReader 上的 AI 伴读插件（**仅支持 DeepSeek**，需自备 API Key）。轻量模式划词即问即答，精读模式面向大部头名著/文献。
+KOReader 上的 AI 伴读插件（**仅支持 DeepSeek**，需自备 API Key）。轻量模式划词即问即答，精读模式面向大部头名著/文献，另带**人物别名**（人名替换与全文提及）系统。
 
-An AI reading companion plugin for KOReader (**DeepSeek only**, bring your own API Key). Lightweight mode answers on word-selection; Intensive Reading mode targets long novels and literature.
+An AI reading companion plugin for KOReader (**DeepSeek only**, bring your own API Key). Lightweight mode answers on word-selection; Intensive Reading mode targets long novels; plus a **character alias** system (name replacement & full-text mention lookup).
 
-> 本仓库为 KOReader AI 阅读助手插件的合并自改版（KOAI 与 AI Reading Assistant 合并，v1.34）。仅供学习交流，请遵守 DeepSeek 及模型服务商的使用条款。
-> This repo is a merged, personally-modified build of the KOReader AI reading assistant (KOAI merged with AI Reading Assistant, v1.34). For learning and communication only — comply with DeepSeek's terms of service.
+> 本仓库为 KOReader AI 阅读助手插件的合并自改版（KOAI 与 AI Reading Assistant 合并，当前版本 **v2.7.5**）。仅供学习交流，请遵守 DeepSeek 及模型服务商的使用条款。
+> This repo is a merged, personally-modified build of the KOReader AI reading assistant (KOAI merged with AI Reading Assistant, now **v2.7.5**). For learning and communication only — comply with DeepSeek's terms of service.
 
 ---
 
@@ -27,7 +27,31 @@ An AI reading companion plugin for KOReader (**DeepSeek only**, bring your own A
 - 超过 10 小时未读自动提示前情回顾 — auto "recap before you continue" after 10h away.
 - 结果富文本分层显示、本地数据管理 — rich-text layered results, local data management.
 
+### 人物别名（v2.x 新增）/ Character Alias (new in v2.x)
+
+读外国名著最头疼的一件事：一个人物有七八种译名（全名、小名、尊称、昵称混用）。人物别名系统用两招解决：
+
+The biggest headache with foreign classics: one character, seven different translated names. The alias system fixes this two ways:
+
+- **人名替换**：长难译名一键换成顺口昵称（如"阿列克塞·费奥多罗维奇·卡拉马佐夫"→"阿辽沙"），直接写进书文件，同书同进度同封面。
+  Replace hard-to-read names with a nickname you choose — written into the book file itself, keeping progress and cover intact.
+- **重建式应用**：替换规则是"目标状态"——删除/停用某条规则后再应用，该人名自动恢复原文，其他替换不受影响；全部删光则一键恢复原书。
+  Rebuild-style apply: rules describe the target state. Delete a rule, re-apply, and that name reverts to the original while other replacements stay.
+- **合并归组**：同一人物的多条规则自动归组（并查集传递合并），显示名统一。
+  Rules for the same character are auto-grouped (union-find) under one display name.
+- **人物全文提及**：扫描全书列出某人物所有出现位置（含全部曾用名），按页码展示、可分页跳转；已生效人物只检索昵称，大部头也能秒扫。
+  Full-text mention lookup: scan the whole book for every occurrence of a character (all name variants), paginated with jump-to-page; applied characters scan by nickname only for speed.
+- 纯本地计算，不耗 token — all local, zero token cost.
+
 ## 📦 安装 / Installation
+
+**方式一（推荐）**：到 [Releases](https://github.com/ChuckLee93/KoreaderAIplus/releases) 下载最新版 zip（如 `KoreaderAIplus-v2.7.5.zip`），解压得到 `koai.koplugin`。
+**Option 1 (recommended)**: grab the latest zip from [Releases](https://github.com/ChuckLee93/KoreaderAIplus/releases) and unzip it.
+
+**方式二**：直接下载本仓库的 `koai.koplugin` 文件夹。
+**Option 2**: download the `koai.koplugin` folder from this repo directly.
+
+然后：
 
 1. 设备连接电脑，进入 `koreader/plugins/` 目录
    Connect the device, open `koreader/plugins/`.
@@ -40,6 +64,9 @@ An AI reading companion plugin for KOReader (**DeepSeek only**, bring your own A
 > API Key 获取：到 <https://platform.deepseek.com> 注册实名认证，创建 API Key 后充值即可（10 元可用很久）。
 > Get a key at <https://platform.deepseek.com> (register, verify, create key, top up — ¥10 lasts a long while).
 
+> 详细使用说明（人物别名怎么用、FAQ、数据位置）见仓库内《安装说明.txt》与《使用说明.txt》。
+> For detailed usage (alias system, FAQ, data locations), see 安装说明.txt and 使用说明.txt in the repo.
+
 ## 🎛 开关怎么用 / Power Mode Toggle
 
 打开任意书籍 → 顶部菜单 → **工具 → KOAI 设置** → 中部【精读模式 (KOAI): 开/关】
@@ -51,13 +78,14 @@ In any book: top menu → **Tools → KOAI Settings** → toggle **Intensive Rea
 - **开**：读大部头时打开；划词自动带上下文并出现「人物／典故」按钮，翻页自动采集已读内容（仅存本地，生成复盘才调 AI）。
   **On**: for long reads; word-selection carries context, character/allusion buttons appear, page-turns are collected locally (AI only called for recaps).
 
-## 💾 数据存储 / Data Storage (v1.34+)
+## 💾 数据存储 / Data Storage
 
 | 内容 | 路径 |
 |---|---|
 | 设置（含 API Key） | `koreader/settings/KOAI_settings.json` |
 | 查询历史（上限 50 条） | `koreader/settings/KOAI_history.json` |
 | 精读档案（按书分文件夹） | `koreader/data/koaireader/books/` |
+| 人物别名规则（按书侧车） | `<书>.sdr/metadata.*.lua`（随书存储） |
 
 旧文件名（`aireadingassistant_*`、`koaireader_settings`）会被自动回读迁移，可放心删除。
 Legacy filenames are auto-migrated on first run; safe to delete.
@@ -73,5 +101,5 @@ GPL-3.0 (see `koai.koplugin/LICENSE`).
 - **AI Reading Assistant** 原作者 / Original author: **chunbo129**
 - **合并与改进 / Merge & improvements**: **ChuckLee93**
 
-感谢以上作者的辛勤创作。本仓库为合并自改版，功能与行为差异见 `安装说明.txt` 的更新记录。
-Thanks to the original authors above. This repo is a merged, modified build; see `安装说明.txt` changelog for what changed.
+感谢以上作者的辛勤创作。本仓库为合并自改版，功能与行为差异见《使用说明.txt》的更新记录。
+Thanks to the original authors above. This repo is a merged, modified build; see 使用说明.txt changelog for what changed.
