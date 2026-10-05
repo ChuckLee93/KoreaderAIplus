@@ -24,6 +24,8 @@ An AI reading companion plugin for KOReader (**DeepSeek only**, bring your own A
 - 划词自动附带**已读上下文**（基于本地采集的实际翻阅内容）+ 防剧透规则 — selected-word answers carry your reading context, spoiler-guarded.
 - **人物／典故**划词卡片、人物关系、故事线、时间线 — character/allusion cards, relationships, story arcs, timelines.
 - 当前进度复盘、前序阅读状态回溯补档、全书阅读档案（可导出 Markdown）— progress recaps, backfill, whole-book archive (Markdown export).
+- 复盘页带页码条（第 X/Y 页，左右点按翻页）；有前序档案时，复盘视图把「前序精读档案」与「当前进度复盘」拼成一页显示。前序补档为**分批追加**：每批只写自己那段、按起始页幂等保存，大部头不会因输出上限丢批。
+  Recap view has a page bar; prior-reading archive is stitched with the latest recap on screen. Backfill appends batch by batch (idempotent per start page) so long books never lose batches.
 - 超过 10 小时未读自动提示前情回顾 — auto "recap before you continue" after 10h away.
 - 结果富文本分层显示、本地数据管理 — rich-text layered results, local data management.
 
@@ -42,6 +44,10 @@ The biggest headache with foreign classics: one character, seven different trans
 - **人物全文提及**：扫描全书列出某人物所有出现位置（含全部曾用名），按页码展示、可分页跳转；已生效人物只检索昵称，大部头也能秒扫。
   Full-text mention lookup: scan the whole book for every occurrence of a character (all name variants), paginated with jump-to-page; applied characters scan by nickname only for speed.
 - 纯本地计算，不耗 token — all local, zero token cost.
+- **规则体检**：打开「别名列表」会当场核对每条规则的名字能否在原文找到 —— 语序写反的加「⚠ 原文语序为：X → Y」标注、原文查无此名的自动隐藏（只影响显示，侧车数据不动）。
+  Rule check-up: the alias list verifies each rule's name against the original text — wrong word order gets a ⚠ note, names not found are hidden (display only).
+- **防误伤防线**：建组与应用两层共十余道判据（身份词守卫、昵称砍切、同姓歧义、配偶称谓、真名截断…），宁可拦住也不改错人；所有全文判断都读原书备份，不受已替换正文干扰。
+  Anti-misfire guards: a dozen-plus checks at both grouping and apply time — better to block than to rewrite the wrong person; all text checks read the original backup, never the replaced text.
 
 ## 📦 安装 / Installation
 

@@ -294,7 +294,12 @@ function SettingsMenu.getMenu(CONFIGURATION, on_change_callback)
       },
       {
         text_func = function()
-          return _("超过10小时提示回顾：")
+          -- 阈值动态显示（configuration.resume_after_hours，≥24h 按天）
+          local hours = tonumber(CONFIGURATION.resume_after_hours) or 168
+          local gap = (hours >= 24)
+              and string.format("超过%d天", math.floor(hours / 24))
+              or string.format("超过%d小时", hours)
+          return _("久读回顾提醒（") .. gap .. _("）：")
               .. (CONFIGURATION.resume_prompt_enabled and _("开启") or _("关闭"))
         end,
         checked_func = function() return CONFIGURATION.resume_prompt_enabled ~= false end,

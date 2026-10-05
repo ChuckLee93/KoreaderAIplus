@@ -437,8 +437,83 @@ function Storage.markPriorReadingPrompted(book)
   Storage.saveState(book, state)
 end
 
+-- v1.2.8（补档分批追加）：各批片段里的结构化字段名。
+-- 目前全库没有读取方，顶层由各批连接生成，先保证信息不丢（将来要用再定合并规则）。
+local PRIOR_LIST_KEYS = {
+  "characters", "relationships", "storylines", "timeline", "factions",
+  "causal_chain", "knowledge_map", "arguments", "concept_links",
+  "open_questions", "allusions",
+}
+local PRIOR_TEXT_KEYS = {
+  "era_context", "historical_impact", "source_note", "current_state",
+}
+
+-- v1.2.8（补档分批追加）：由各批片段派生顶层档案。
+-- batches 是真值来源（每批只含本批新增内容），顶层 display／resume 按 start_page 顺序拼接，
+-- 这样所有既有读取点（统一用 prior.display / prior.resume）无需任何改动。
+-- 老档案没有 batches 时不经过这里，行为与改造前完全一致。
+function Storage.composePriorRecap(snapshot, batches, meta)
+  local out = {}
+  if type(snapshot) == "table" then
+    for k, v in pairs(snapshot) do out[k] = v end
+  end
+  -- 结构化字段一律由批次重算，避免旧值残留
+  for _, key in ipairs(PRIOR_LIST_KEYS) do out[key] = nil end
+  for _, key in ipairs(PRIOR_TEXT_KEYS) do out[key] = nil end
+
+  local segments = {}
+  if type(batches) == "table" then
+    for _, seg in ipairs(batches) do
+      if type(seg) == "table" then segments[#segments + 1] = seg end
+    end
+  end
+  table.sort(segments, function(a, b)
+    return (tonumber(a.start_page) or 0) < (tonumber(b.start_page) or 0)
+  end)
+
+  local displays, resumes = {}, {}
+  for _, seg in ipairs(segments) do
+    local d = tostring(seg.display or "")
+    if d ~= "" then displays[#displays + 1] = d end
+    local r = tostring(seg.resume or "")
+    if r ~= "" then resumes[#resumes + 1] = r end
+  end
+
+  for _, key in ipairs(PRIOR_LIST_KEYS) do
+    local acc = {}
+    for _, seg in ipairs(segments) do
+      if type(seg[key]) == "table" then
+        for _, item in ipairs(seg[key]) do acc[#acc + 1] = item end
+      end
+    end
+    if #acc > 0 then out[key] = acc end
+  end
+  for _, key in ipairs(PRIOR_TEXT_KEYS) do
+    local acc = {}
+    for _, seg in ipairs(segments) do
+      local value = tostring(seg[key] or "")
+      if value ~= "" then acc[#acc + 1] = value end
+    end
+    if #acc > 0 then out[key] = table.concat(acc, "\n") end
+  end
+
+  out.batches = segments
+  out.display = table.concat(displays, "\n\n")
+  out.resume = table.concat(resumes, "\n")
+  if type(meta) == "table" then
+    for k, v in pairs(meta) do out[k] = v end
+  end
+  return out
+end
+
 function Storage.loadPriorRecap(book)
-  return readJson(book.prior_recap_path, nil)
+  local data = readJson(book.prior_recap_path, nil)
+  -- v1.2.8（补档分批追加）：自愈——批次在但顶层文本为空（落盘中断等）时现场派生一份。
+  if type(data) == "table" and type(data.batches) == "table" and #data.batches > 0
+      and tostring(data.display or "") == "" then
+    data = Storage.composePriorRecap(data, data.batches, {})
+  end
+  return data
 end
 
 function Storage.savePriorRecap(book, data)
@@ -1598,9 +1673,22 @@ function Storage.formatResume(book)
   lines[#lines + 1] = "前序阅读状态｜" .. Storage.formatPriorReadingStatus(book)
   if coverage.first then lines[#lines + 1] = "KOAI实时采集起点｜" .. Storage.formatPosition(coverage.first) end
   if state.last_left_at then lines[#lines + 1] = "离开时间｜" .. os.date("%Y-%m-%d %H:%M", tonumber(state.last_left_at)) end
+  -- v1.2.7（方案甲）：前序档案显示层拼接（回顾视图用短 resume；已并入过则不拼）。
+  -- exportMarkdown 走本函数，导出同样受益。
+  local merged_at = tonumber(state.prior_merged_into_latest_at) or 0
+  local prior = merged_at > 0 and nil or Storage.loadPriorRecap(book)
+  local prior_text = prior and tostring(prior.resume or "") or ""
+  local prior_block = ""
+  if prior_text ~= "" then
+    local end_page = tonumber(prior.end_page) or tonumber(prior.last_batch_end_page) or 0
+    local range_text = end_page > 0 and ("（补建到第 " .. tostring(end_page) .. " 页）") or ""
+    prior_block = "\n前序精读档案｜书首 → 首次记录点" .. range_text .. "\n" .. prior_text .. "\n────────────────"
+  end
   if recap then
     local body = recap.resume or recap.display or recap.summary or ""
-    if body ~= "" then lines[#lines + 1] = "\n" .. body end
+    if body ~= "" then
+      lines[#lines + 1] = "\n" .. (prior_block ~= "" and ("当前累计复盘\n" .. body) or body)
+    end
   else
     lines[#lines + 1] = "\n尚无进度复盘。生成后会记录已处理位置，后续只分析新增内容。"
   end

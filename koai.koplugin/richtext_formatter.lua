@@ -54,6 +54,8 @@ local section_headings = {
   ["核心论点"] = true,
   ["概念联系"] = true,
   ["来源／可靠性"] = true,
+  ["当前累计复盘"] = true,
+  ["前序精读档案"] = true,
 }
 
 -- 复盘正文中的这些标签按“标题 + 下一行正文”显示，避免六英寸屏上一整坨。
@@ -361,6 +363,17 @@ local function escapeLuaPattern(text)
   return (tostring(text or ""):gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1"))
 end
 
+-- v1.2.7：查表前剥【】壳。DeepSeek 偶尔把标签写成【概要】形态（latest 复盘实测单行 23 个｜、
+-- 12 个【标签】段），不剥壳会整段掉进实体名／圆点平铺分支。仅当整串是「【…】」纯壳形态才剥，
+-- 「【概要】正文…」这类带内容的串不受影响。
+local function lookupLabel(tbl, key)
+  local value = tbl[key]
+  if value then return true end
+  local bare = tostring(key or ""):match("^【(.-)】$")
+  if bare and bare ~= "" then return tbl[bare] and true or false end
+  return false
+end
+
 local function normalizeInlineKnownLabels(text)
   text = tostring(text or "")
   for label, _ in pairs(known_labels) do
@@ -423,7 +436,7 @@ end
 
 local function isLikelyEntityName(text)
   text = trim(text)
-  if text == "" or known_labels[text] or card_types[text] then return false end
+  if text == "" or lookupLabel(known_labels, text) or lookupLabel(card_types, text) then return false end
   -- UTF-8 字节数限制较宽松，足以覆盖中外文姓名与短典故名。
   return #text <= 72 and not text:find("[。！？；:]$")
 end
@@ -435,14 +448,16 @@ local function appendLabelLine(output, label, value)
     if value ~= "" then table.insert(output, value) end
     return
   end
-  if card_types[label] and value ~= "" then
+  if lookupLabel(card_types, label) and value ~= "" then
     appendDivider(output)
     table.insert(output, bold("◆ " .. value) .. " 〔" .. label .. "〕")
     table.insert(output, "")
-  elseif block_labels[label] and value ~= "" then
+  elseif lookupLabel(block_labels, label) and value ~= "" then
     -- 复盘主体：标签独占一行，正文另起一行，并在区块之间留一行。
+    -- v1.2.7：带【】壳的标签剥壳后显示（与裸标签统一为「▌ 概要」形态）。
+    local shown = tostring(label):match("^【(.-)】$") or label
     appendBlank(output)
-    table.insert(output, bold("▌ " .. label))
+    table.insert(output, bold("▌ " .. shown))
     table.insert(output, value)
     table.insert(output, "")
   elseif value ~= "" then
@@ -463,7 +478,7 @@ local function looksLikeAlternatingLabelPairs(parts)
   local pair_count = math.floor(#parts / 2)
   local label_count = 0
   for index = 1, pair_count * 2, 2 do
-    if known_labels[trim(parts[index])] then label_count = label_count + 1 end
+    if lookupLabel(known_labels, trim(parts[index])) then label_count = label_count + 1 end
   end
   return label_count >= 2 and label_count * 2 >= pair_count
 end
@@ -473,8 +488,10 @@ local function appendAlternatingLabelPairs(output, parts)
   while index <= #parts do
     local label = trim(parts[index])
     local value = trim(parts[index + 1] or "")
-    if known_labels[label] then
-      if (label == "统一名称" or label == "名称") and value ~= "" then
+    if lookupLabel(known_labels, label) then
+      -- v1.2.7：【统一名称】／【名称】带壳形态剥壳后与裸形态同样走 ◆ 卡名分支。
+      local bare_label = tostring(label):match("^【(.-)】$") or label
+      if (bare_label == "统一名称" or bare_label == "名称") and value ~= "" then
         if #output > 0 then appendDivider(output) end
         table.insert(output, bold("◆ " .. value))
         table.insert(output, "")
@@ -517,7 +534,7 @@ function Formatter.format(text)
         first_nonempty_seen = true
         if looksLikeAlternatingLabelPairs(parts) then
           appendAlternatingLabelPairs(output, parts)
-        elseif #parts >= 2 and card_types[parts[1]] and parts[2] ~= "" then
+        elseif #parts >= 2 and lookupLabel(card_types, parts[1]) and parts[2] ~= "" then
           table.insert(output, bold("◆ " .. parts[2]) .. " 〔" .. parts[1] .. "〕")
           table.insert(output, "")
           for index = 3, #parts do
@@ -530,15 +547,15 @@ function Formatter.format(text)
           for index = 2, #parts do
             if parts[index] ~= "" then table.insert(output, "• " .. parts[index]) end
           end
-        elseif #parts >= 2 and known_labels[parts[1]] then
-          appendLabelLine(output, parts[1], table.concat(parts, "｜", 2))
+      elseif #parts >= 2 and lookupLabel(known_labels, parts[1]) then
+        appendLabelLine(output, parts[1], table.concat(parts, "｜", 2))
         else
           table.insert(output, bold(line))
           table.insert(output, "")
         end
       elseif looksLikeAlternatingLabelPairs(parts) then
         appendAlternatingLabelPairs(output, parts)
-      elseif #parts >= 2 and card_types[parts[1]] and parts[2] ~= "" then
+      elseif #parts >= 2 and lookupLabel(card_types, parts[1]) and parts[2] ~= "" then
         appendLabelLine(output, parts[1], parts[2])
         for index = 3, #parts do
           if parts[index] ~= "" then table.insert(output, "• " .. parts[index]) end
@@ -550,7 +567,7 @@ function Formatter.format(text)
         for index = 2, #parts do
           if parts[index] ~= "" then table.insert(output, "• " .. parts[index]) end
         end
-      elseif #parts >= 2 and (known_labels[parts[1]] or #parts == 2) then
+      elseif #parts >= 2 and (lookupLabel(known_labels, parts[1]) or #parts == 2) then
         appendLabelLine(output, parts[1], table.concat(parts, "｜", 2))
       elseif section_headings[line] or isNumberedHeading(line) or looksLikeBracketHeading(line) then
         appendBlank(output)

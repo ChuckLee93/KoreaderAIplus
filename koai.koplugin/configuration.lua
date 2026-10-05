@@ -46,9 +46,10 @@ local CONFIGURATION = {
   -- 异常防护上限：避免模型偶发失控而一次耗尽余额。
   response_max_tokens = 8192,
 
-  -- 超过该小时数再次打开/唤醒时提示前情回顾。
+  -- 超过该小时数再次打开/唤醒时提示前情回顾（168 = 7 天；常规阅读一周不见的书
+  -- 才需要前情回顾，10 小时几乎每次隔夜打开都会弹，2026-09-27 用户拍板改一周）。
   resume_prompt_enabled = true,
-  resume_after_hours = 10,
+  resume_after_hours = 168,
 
   -- 自动采集实际翻阅过的当前屏文字（仅本地保存，生成复盘时才发送）。
   auto_capture_enabled = true,

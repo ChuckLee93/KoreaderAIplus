@@ -427,7 +427,7 @@ function AIReadingAssistant:maybePromptResume()
     local state = Storage.loadState(book)
     local left_at = tonumber(state.last_left_at) or 0
     if left_at <= 0 then return end
-    local threshold = (tonumber(CONFIGURATION.resume_after_hours) or 10) * 3600
+    local threshold = (tonumber(CONFIGURATION.resume_after_hours) or 168) * 3600
     if os.time() - left_at < threshold then return end
     session_key = book.id .. "|" .. tostring(left_at)
     -- ReaderReady 与 Resume 可能连续触发；运行期锁与持久化标记双重防重。

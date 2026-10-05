@@ -26,6 +26,7 @@ local MovableContainer = require("ui/widget/container/movablecontainer")
 local Notification = require("ui/widget/notification")
 local ScrollTextWidget = require("ui/widget/scrolltextwidget")
 local Size = require("ui/size")
+local TextWidget = require("ui/widget/textwidget")
 local TitleBar = require("ui/widget/titlebar")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
@@ -193,6 +194,8 @@ function AICompanionViewer:init()
   -- Callback to enable/disable buttons, for at-top/at-bottom feedback
   local prev_at_top = false -- Buttons were created enabled
   local prev_at_bottom = false
+  -- v1.2.7（方案甲+翻页）：页码指示更新函数（前向声明，init 后段创建页码行时赋值）。
+  local update_page_indicator
   local function button_update(id, enable)
     local button = self.button_table:getButtonById(id)
     if button then
@@ -219,6 +222,7 @@ function AICompanionViewer:init()
       button_update("bottom", false)
       prev_at_bottom = true
     end
+    if update_page_indicator then update_page_indicator(low, high) end
   end
 
   -- buttons
@@ -286,7 +290,44 @@ function AICompanionViewer:init()
     show_parent = self,
   }
 
-  local textw_height = self.height - titlebar:getHeight() - self.button_table:getSize().h
+  -- v1.2.7（方案甲+翻页）：页码指示条。ScrollTextWidget 左右半屏点按／上下滑动本来就是整页步进，
+  -- 这里只补一个「第 x ／ n 页」显示行，放在正文与按钮之间。文本为空格占位以量出行高。
+  local page_face = Font:getFace("smallinfofont", 16)
+  self.page_text_w = TextWidget:new {
+    text = " ",
+    face = page_face,
+    alignment = "center",
+  }
+  local page_row_height = self.page_text_w:getSize().h + Size.padding.small
+  self.page_container = CenterContainer:new {
+    dimen = Geom:new {
+      w = self.width,
+      h = page_row_height,
+    },
+    self.page_text_w,
+  }
+  function update_page_indicator(low, high)
+    -- 页码算法：vis=可视占比；total=向上取整；cur=起始行所在页（floor 而非 round，
+    -- 验证：low=0.3、vis=0.4 → 起始行在第 1 页）；high 触底时强制末页；钳位 1..total。
+    local vis = (high or 1) - (low or 0)
+    if vis <= 0 then return end
+    local total = math.max(1, math.ceil(1 / vis))
+    local cur = math.floor((low or 0) / vis) + 1
+    if (high or 0) >= 0.999 then cur = total end
+    if cur < 1 then cur = 1 end
+    if cur > total then cur = total end
+    local text = string.format("第 %d ／ %d 页", cur, total)
+    if self.page_text_w.text == text then return end
+    local first_paint = self.page_text_w.text == " "
+    self.page_text_w:setText(text)
+    if first_paint then return end -- 首次赋值发生在 onShow 整体重绘之前，无需单独刷新区域
+    UIManager:setDirty(self, function()
+      return "ui", self.page_container.dimen
+    end)
+  end
+  self._update_page_indicator = update_page_indicator
+
+  local textw_height = self.height - titlebar:getHeight() - self.button_table:getSize().h - page_row_height
 
   self.scroll_text_w = ScrollTextWidget:new {
     text = self.text,
@@ -324,6 +365,7 @@ function AICompanionViewer:init()
         },
         self.textw,
       },
+      self.page_container,
       CenterContainer:new {
         dimen = Geom:new {
           w = self.width,
@@ -397,6 +439,13 @@ function AICompanionViewer:onShow()
   UIManager:setDirty(self, function()
     return "partial", self.frame.dimen
   end)
+  -- v1.2.7：初始页码渲染（滚动回调只在翻页时触发，打开时先刷一次）。
+  if self._update_page_indicator then
+    pcall(function()
+      local low, high = self.scroll_text_w.text_widget:getVisibleHeightRatios()
+      self._update_page_indicator(low or 0, high or 1)
+    end)
+  end
   return true
 end
 

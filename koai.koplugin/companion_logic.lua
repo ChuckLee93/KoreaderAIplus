@@ -586,6 +586,10 @@ end
 local function processRecapBatches(ui, book, preview)
   local config = require("configuration")
   local batch_limit = tonumber(config.recap_batch_max_bytes) or 70000
+  -- v1.2.6：失败自动拆批。active_limit=当前每批预算；split_left=剩余拆分次数。
+  -- 失败批次不推进断点（after_id 只在成功路径更新），拆小后重试天然从同一位置继续，无重复成本。
+  local active_limit = batch_limit
+  local split_left = 2
   local after_id = tonumber(preview.after_id) or 0
   local batch_number, processed_count, processed_chars = 0, 0, 0
   local final_recap, final_position
@@ -593,6 +597,13 @@ local function processRecapBatches(ui, book, preview)
 
   local function finish()
     Storage.applyStoragePolicy(book)
+    -- v1.2.7（方案甲）：复盘生成成功 = 前序档案已按系统提示词要求融入最新复盘；
+    -- 置位并入标记，显示层拼接与 AI 上下文的前序双喂随之停止（前序补档重跑完成时会清除本标记）。
+    local merged_state = Storage.loadState(book)
+    if merged_state then
+      merged_state.prior_merged_into_latest_at = os.time()
+      Storage.saveState(book, merged_state)
+    end
     local position_text = final_position and Storage.formatPosition(final_position) or "未知位置"
     local header = table.concat({
       "阅读模式｜" .. modeDisplay(mode_info),
@@ -614,7 +625,7 @@ local function processRecapBatches(ui, book, preview)
   end
 
   local function nextBatch()
-    local batch = Storage.readNextPendingBatch(book, after_id, batch_limit)
+    local batch = Storage.readNextPendingBatch(book, after_id, active_limit)
     if batch.count == 0 then finish(); return end
     batch_number = batch_number + 1
     runAI(
@@ -623,15 +634,23 @@ local function processRecapBatches(ui, book, preview)
       function(raw)
         local data = extractJson(raw)
         if not data then
-          -- v1.2.3：绝不再把坏 JSON 原样保存成复盘。
-          -- 本批保持“未处理”，用户重试时会从同一断点继续，不会丢阅读原文。
-          local partial_display = extractJsonStringField(raw, "display")
-          local message = table.concat({
-            "KOAI 返回的结构化复盘被截断或 JSON 格式不完整。",
-            "本批没有写入阅读档案，也没有标记为已处理；可直接重新生成。",
-            partial_display and partial_display ~= "" and ("\n已提取到的可读摘要：\n" .. partial_display) or "",
-          }, "\n")
-          showText("复盘未完整写入｜请重试", message)
+          -- v1.2.5：失败提示不再附大段预览；原始返回尾巴写日志供取证。
+          pcall(function() require("logger").warn("[KOAI] 复盘批次 JSON 解析失败 raw_len="
+            .. tostring(#raw) .. " tail=" .. tostring(raw:sub(-160))) end)
+          -- v1.2.6：本批偏大导致返回不完整时，先自动对半拆小重试（最多 2 次，下限 12000），耗尽才弹失败框。
+          if split_left > 0 and batch.count > 1 then
+            split_left = split_left - 1
+            active_limit = math.max(12000, math.floor(active_limit / 2))
+            pcall(function() require("logger").warn("[KOAI] 复盘批次自动拆小重试 active_limit=" .. tostring(active_limit)) end)
+            UIManager:show(InfoMessage:new {
+              text = "本批内容偏多，KOAI 返回不完整；已自动拆小，正在重试…",
+              timeout = 4,
+            })
+            UIManager:nextTick(nextBatch)
+            return
+          end
+          showText("复盘未完整写入｜请重试",
+            "KOAI 返回的结构化复盘被截断或 JSON 格式不完整。\n本批没有写入阅读档案，也没有标记为已处理；可直接重新生成。")
           return
         end
         local recap = mergeRecapData(book, data, batch.last, raw, batch, mode_info)
@@ -641,12 +660,27 @@ local function processRecapBatches(ui, book, preview)
         after_id = batch.last_id
         if batch.has_more then UIManager:nextTick(nextBatch) else finish() end
       end,
-      {max_tokens = tonumber(config.response_max_tokens) or 8192, temperature = 0.2},
+      {thinking = { type = "disabled" }, max_tokens = tonumber(config.response_max_tokens) or 8192, temperature = 0.2},
       fail
     )
   end
 
   nextBatch()
+end
+
+-- v1.2.7（方案甲）：前序档案显示层拼接。未并入（prior_merged_into_latest_at 为空）且有前序档案时，
+-- 返回拼接头（前序段 + 分隔线 + 当前段标记）；已并入或无前序返回空串。只影响显示，不改任何档案。
+local function priorStitchedText(book)
+  local state = Storage.loadState(book)
+  local merged_at = tonumber(state and state.prior_merged_into_latest_at) or 0
+  if merged_at > 0 then return "" end
+  local prior = Storage.loadPriorRecap(book)
+  local text = prior and tostring(prior.display or prior.resume or "") or ""
+  if text == "" then return "" end
+  local end_page = tonumber(prior.end_page) or tonumber(prior.last_batch_end_page) or 0
+  local range_text = end_page > 0 and ("（补建到第 " .. tostring(end_page) .. " 页）") or ""
+  return "\n前序精读档案｜书首 → 首次记录点" .. range_text .. "\n" .. text
+      .. "\n────────────────\n当前累计复盘\n"
 end
 
 function Logic.generateChapterRecap(ui)
@@ -658,6 +692,18 @@ function Logic.generateChapterRecap(ui)
   if preview.count == 0 then
     local processed = preview.processed_position and Storage.formatPosition(preview.processed_position) or "尚未生成"
     local latest = Storage.loadLatestRecap(book)
+    -- v1.2.7（方案甲）：还没有任何累计复盘、但已有前序补档时，用前序档案顶替显示（只显示，不落盘、不算已并入）。
+    local prior_only = false
+    if not latest or tostring(latest.display or "") == "" then
+      local prior = Storage.loadPriorRecap(book)
+      local prior_text = prior and tostring(prior.display or prior.resume or "") or ""
+      if prior_text ~= "" then
+        local end_page = tonumber(prior.end_page) or tonumber(prior.last_batch_end_page) or 0
+        local range_text = end_page > 0 and ("（补建到第 " .. tostring(end_page) .. " 页）") or ""
+        latest = { display = "前序精读档案｜书首 → 首次记录点" .. range_text .. "\n" .. prior_text }
+        prior_only = true
+      end
+    end
     if latest and tostring(latest.display or "") ~= "" then
       -- v1.2.4：没有新增内容时也直接打开最新复盘。
       -- 这样升级显示修复后可以马上查看旧复盘的新排版，不需要再次调用 API。
@@ -668,7 +714,10 @@ function Logic.generateChapterRecap(ui)
         "内容依据｜用户已确认的已读范围：实时采集正文 + 已完成的前序原文补档（如有）",
         "",
       }, "\n")
-      showText("当前进度复盘｜已处理到 " .. processed, header .. tostring(latest.display or ""))
+      -- v1.2.7（方案甲）：显示层拼接前序档案；已并入过则 priorStitchedText 返回空串。
+      -- prior_only（前序顶替显示）时不再拼接，避免同一段显示两遍。
+      showText("当前进度复盘｜已处理到 " .. processed,
+        header .. (prior_only and "" or priorStitchedText(book)) .. tostring(latest.display or ""))
     else
       UIManager:show(InfoMessage:new {
         text = "目前没有尚未处理的新阅读内容。\n阅读模式｜" .. modeDisplay(mode_info) .. "\n复盘已处理到｜" .. processed,
@@ -753,7 +802,7 @@ function Logic.createCard(ui, selected_text, context_text)
       end
       showText("人物／典故｜已生成 " .. tostring(#names) .. " 张卡片", table.concat(output, "\n"))
     end,
-    {max_tokens = 6144, temperature = 0.15}
+    {thinking = { type = "disabled" }, max_tokens = 6144, temperature = 0.15}
   )
 end
 
@@ -793,20 +842,22 @@ local function priorBackfillMessages(book, batch, previous_text, mode_info)
 
 你收到的“本批前序原文”由插件直接从当前设备上的这一本电子书中，按从书籍开头到首次 KOAI 采集点之前的顺序回溯提取。它是有原文依据的已读内容，不是模型记忆。
 
-任务：
-1. 把“上一批前序累计精读档案”和“本批前序原文”按阅读顺序合并，建立越来越完整的前序精读档案。
-2. 不设固定字数、不设人物数量、不设栏目数量。复杂内容充分展开；不得为了简短删掉重要人物、亲缘／姻亲／主仆关系、称谓、关键事件、关键细节、诗词曲文、典故文化、叙事线索和未解决问题。
-3. 小说只能处理本批及更早已经提供的原文，绝对不能利用模型知道的后文补充情节、隐藏身份、结局或伏笔答案。
-4. 这是“补建已读上下文”，不是给用户重新讲一遍全书。重点是建立后续精读所需的连续人物关系、事件因果、叙事线索和文化语境。
-5. 返回格式沿用下面的 KOAI 累计复盘 JSON 规范。]=] .. "\n\n" .. buildRecapSystemPrompt(mode_info)
+任务（v1.2.8 起：本批只写新增内容，不再要求重写累计档案；v1.2.9 起：正文不使用“本批”类批次口吻）：
+1. 只输出本批前序原文里新出现的内容。此前批次已经记录过的人物、事件、线索、称谓不要重复输出；同一个人物在本批有新进展时，只写这个新进展。
+2. 前面提供的“此前已建立的前序档案”只作为背景，供你保持人名、称谓、时间线和叙事线索的连贯；绝对不要在正文里复述它。
+3. 不设固定字数、不设人物数量、不设栏目数量。本批内容该展开就充分展开；不得为了简短删掉重要人物、亲缘／姻亲／主仆关系、称谓、关键事件、关键细节、诗词曲文、典故文化、叙事线索和未解决问题。
+4. 小说只能处理本批及更早已经提供的原文，绝对不能利用模型知道的后文补充情节、隐藏身份、结局或伏笔答案。
+5. 这是“补建已读上下文”，不是给用户重新讲一遍全书。重点是建立后续精读所需的连续人物关系、事件因果、叙事线索和文化语境。
+6. 返回格式沿用下面的 KOAI 累计复盘 JSON 规范，但内容范围严格限定为本批新增。
+7. 行文口吻（对 JSON 里所有文本字段都适用）：这是一份连续的已读档案，不是工作汇报。不要用“本批”“本批次”“本次”“这一批”“接续前批”之类的批次字样开头或穿插在句子里；直接从内容、章节或事件写起（例如“进入第一编第二章《斯基泰人》……”），需要交代位置时用章节名或页码即可。]=] .. "\n\n" .. buildRecapSystemPrompt(mode_info)
 
   local user_content = table.concat({
     "书名：" .. book.title,
     book.authors ~= "" and ("作者：" .. book.authors) or "",
     "阅读模式：" .. modeDisplay(mode_info),
     "本批回溯页范围｜第" .. tostring(batch.start_page) .. "页 → 第" .. tostring(batch.end_page) .. "页",
-    "\n上一批前序累计精读档案：\n" .. (previous_text ~= "" and previous_text or "这是第一批，从书籍开头开始建立。"),
-    "\n本批前序已读原文：\n" .. tostring(batch.text or ""),
+    "\n此前已建立的前序档案（仅供理解上下文，不要复述）：\n" .. (previous_text ~= "" and previous_text or "这是第一批，从书籍开头开始建立。"),
+    "\n本批前序已读原文（只写这一段里新出现的内容）：\n" .. tostring(batch.text or ""),
   }, "\n")
   return {
     {role = "system", content = system},
@@ -814,78 +865,12 @@ local function priorBackfillMessages(book, batch, previous_text, mode_info)
   }
 end
 
-local function mergePriorWithCurrent(ui, book, prior_data, mode_info, done_callback)
-  local current = Storage.loadLatestRecap(book)
-  local prior_text = tostring(prior_data and (prior_data.display or prior_data.resume) or "")
-  if prior_text == "" then
-    if done_callback then done_callback(nil) end
-    return
-  end
-
-  local state = Storage.loadState(book)
-  local position = state.last_recap_position or (current and {
-    chapter = current.chapter,
-    chapter_key = current.chapter_key,
-    page = current.page,
-    percent = current.percent,
-  }) or Storage.getPosition(ui)
-
-  if not current or tostring(current.display or current.resume or "") == "" then
-    local recap = mergeRecapData(book, prior_data, position, "", nil, mode_info)
-    local merged_state = Storage.loadState(book)
-    merged_state.prior_merged_into_latest_at = os.time()
-    Storage.saveState(book, merged_state)
-    if done_callback then done_callback(recap) end
-    return
-  end
-
-  local system = buildRecapSystemPrompt(mode_info) .. [=[
-
-现在执行一次“跨设备前序补档后的总档案整合”，不是新增剧情分析。
-时间顺序必须是：
-① 前序补建档案：书籍开头 → 首次 KOAI 采集点之前；
-② 现有累计档案：首次 KOAI 采集点 → 当前已读位置。
-
-请把两者整合成一份连续的累计精读档案。不能因为前序内容较多就把人物关系、关键事件、文化语境和叙事线索压没；也不能重复堆叠同一信息。不得加入当前已读位置之后的任何内容。返回同一套严格 JSON。]=]
-
-  local user_content = table.concat({
-    "书名：" .. book.title,
-    "阅读模式：" .. modeDisplay(mode_info),
-    "\n前序已读补建档案：\n" .. prior_text,
-    "\n首次采集点之后的现有累计档案：\n" .. tostring(current.display or current.resume or ""),
-    "\n当前故事线／关系／时间线：\n" .. Storage.formatWorld(book),
-  }, "\n")
-
-  runAI(
-    "正在把前序补档与当前档案合并",
-    {{role = "system", content = system}, {role = "user", content = user_content}},
-    function(raw)
-      local data = extractJson(raw)
-      if not data then
-        UIManager:show(InfoMessage:new {
-          text = "前序精读档案已经补建成功，但最后一次总档案合并返回格式不完整。\n不会丢数据；后续精读仍会同时读取前序档案与现有累计档案。",
-          timeout = 14,
-        })
-        if done_callback then done_callback(nil) end
-        return
-      end
-      local recap = mergeRecapData(book, data, position, raw, nil, mode_info)
-      local merged_state = Storage.loadState(book)
-      merged_state.prior_merged_into_latest_at = os.time()
-      Storage.saveState(book, merged_state)
-      if done_callback then done_callback(recap) end
-    end,
-    {max_tokens = tonumber(require("configuration").response_max_tokens) or 8192, temperature = 0.18},
-    function(message)
-      UIManager:show(InfoMessage:new {
-        text = "前序补档已经保存，但总档案合并暂时失败：" .. tostring(message)
-            .. "\n之后可以重新生成当前进度复盘，前序档案不会丢失。",
-        timeout = 14,
-      })
-      if done_callback then done_callback(nil) end
-    end
-  )
-end
+-- v1.2.7（方案甲）：AI 总档案合并（mergePriorWithCurrent）已删除。
+-- 原因：前序档案 + 现有累计档案一次性全量重发，输出超出上限导致合并返回不完整（KM 第 4 批实测）。
+-- 替代方案（不需要额外 API 调用）：
+-- ① 显示层拼接：复盘视图／继续阅读回顾在未并入时自动拼上「前序精读档案」段（priorStitchedText / formatResume）；
+-- ② 下次复盘生成成功时置位 prior_merged_into_latest_at（processRecapBatches.finish），拼接自动停止；
+-- ③ AI 上下文维持 getPrecisionContext 双态分支不变（未并入时前序+最新双喂，已并入后只喂最新）。
 
 local function processPriorBackfill(ui, book)
   local config = require("configuration")
@@ -910,7 +895,8 @@ local function processPriorBackfill(ui, book)
   local prior = Storage.loadPriorRecap(book) or {}
   local start_page = tonumber(prior.next_page) or 1
   if tonumber(prior.end_page) ~= tonumber(range.end_page) or start_page < 1 or start_page > range.end_page + 1 then
-    prior = {}
+    -- v1.2.8（补档分批追加）：从头补建时同步清空批次片段，避免旧片段混进新拼接。
+    prior = {batches = {}}
     start_page = 1
   end
 
@@ -922,16 +908,23 @@ local function processPriorBackfill(ui, book)
 
   local mode_info = Storage.getReadingModeInfo(book, "")
   local batch_limit = tonumber(config.recap_batch_max_bytes) or 70000
+  -- v1.2.6：失败自动拆批（同复盘流程）。失败批次不推进 start_page，重试天然从同一页继续。
+  local active_limit = batch_limit
+  local split_left = 2
   local previous_text = tostring(prior.display or prior.resume or "")
   local batch_no = tonumber(prior.batch_no) or 0
   local final_data = prior
 
   local function finish()
-    local finished = Storage.loadPriorRecap(book) or final_data or {}
-    finished.status = "complete"
-    finished.next_page = range.end_page + 1
-    finished.end_page = range.end_page
-    finished.completed_at = os.time()
+    -- v1.2.8（补档分批追加）：以内存中的档案为准组装收尾态。
+    -- 不能从磁盘回读——「end_page 变化 → 从头补建」的清空场景下磁盘上还留着旧档案。
+    local finished = type(final_data) == "table" and final_data or {}
+    finished = Storage.composePriorRecap(finished, finished.batches or {}, {
+      status = "complete",
+      next_page = range.end_page + 1,
+      end_page = range.end_page,
+      completed_at = os.time(),
+    })
     Storage.savePriorRecap(book, finished)
 
     local st = Storage.loadState(book)
@@ -940,21 +933,24 @@ local function processPriorBackfill(ui, book)
     st.prior_backfill_completed_at = os.time()
     st.prior_backfill_start_page = 1
     st.prior_backfill_end_page = range.end_page
+    -- v1.2.7（方案甲）：前序补档重跑完成 = 前序内容可能有更新，清除并入标记、恢复显示层拼接；
+    -- 下次复盘生成成功后会重新置位。
+    st.prior_merged_into_latest_at = nil
     Storage.saveState(book, st)
 
-    mergePriorWithCurrent(ui, book, finished, mode_info, function()
-      UIManager:show(InfoMessage:new {
-        text = "前序精读档案已补建完成。\n"
-            .. "范围｜书籍开头 → 首次 KOAI 采集点之前\n"
-            .. "以后中文精读、当前进度复盘和全书档案都会把这部分作为已读上下文连续使用。",
-        timeout = 15,
-      })
-    end)
+    -- v1.2.7（方案甲）：不再调用 AI 总档案合并（mergePriorWithCurrent 已删除）；
+    -- 前序段改为显示层拼接 + 下次复盘自动融入，省一次整档重发。
+    UIManager:show(InfoMessage:new {
+      text = "前序精读档案已补建完成。\n"
+          .. "范围｜书籍开头 → 首次 KOAI 采集点之前\n"
+          .. "当前进度复盘会把这部分拼在一起显示；下次复盘生成时会自动融入。",
+      timeout = 15,
+    })
   end
 
   local function nextBatch()
     if start_page > range.end_page then finish(); return end
-    local batch, err = Storage.readPriorTextBatch(ui, start_page, range.end_page, batch_limit)
+    local batch, err = Storage.readPriorTextBatch(ui, start_page, range.end_page, active_limit)
     if not batch then
       UIManager:show(InfoMessage:new {
         text = "前序补档读取失败：" .. tostring(err) .. "\n已经完成的批次不会丢失。",
@@ -977,31 +973,88 @@ local function processPriorBackfill(ui, book)
       function(raw)
         local data = extractJson(raw)
         if not data then
-          local partial = extractJsonStringField(raw, "display")
+          -- v1.2.5：失败提示精简为一行（大段预览无阅读价值）；原始返回尾巴写日志供取证。
+          pcall(function() require("logger").warn("[KOAI] 前序补档第 " .. tostring(batch_no)
+            .. " 批 JSON 解析失败 raw_len=" .. tostring(#raw) .. " tail=" .. tostring(raw:sub(-160))) end)
+          -- v1.2.6：本批偏大导致返回不完整时，先自动对半拆小重试（最多 2 次，下限 12000），耗尽才弹失败框。
+          if split_left > 0 and batch.count > 1 then
+            split_left = split_left - 1
+            active_limit = math.max(12000, math.floor(active_limit / 2))
+            pcall(function() require("logger").warn("[KOAI] 前序补档自动拆小重试 active_limit=" .. tostring(active_limit)) end)
+            UIManager:show(InfoMessage:new {
+              text = "第 " .. tostring(batch_no) .. " 批内容偏多，返回不完整；已自动拆小，正在重试…",
+              timeout = 4,
+            })
+            UIManager:nextTick(nextBatch)
+            return
+          end
           UIManager:show(InfoMessage:new {
-            text = "本批前序补档返回格式不完整，未推进断点。"
-                .. (partial and partial ~= "" and ("\n\n已生成内容预览：\n" .. partial) or "")
-                .. "\n重新进入“前序阅读状态”即可从同一页继续。",
+            text = "第 " .. tostring(batch_no) .. " 批（第 " .. tostring(batch.start_page)
+                .. " 页起）前序补档返回格式不完整，未推进断点。\n"
+                .. "已完成部分已保存；重新进入“前序阅读状态”即可从第 "
+                .. tostring(batch.start_page) .. " 页继续。",
             timeout = 15,
           })
           return
         end
 
-        previous_text = tostring(data.display or data.resume or previous_text)
-        final_data = data
-        final_data.status = "in_progress"
-        final_data.start_page = 1
-        final_data.end_page = range.end_page
-        final_data.last_batch_start_page = batch.start_page
-        final_data.last_batch_end_page = batch.end_page
-        final_data.next_page = batch.next_page
-        final_data.batch_no = batch_no
+        -- v1.2.8（补档分批追加）：本批只含新增内容，按页起点幂等写入片段
+        -- （拆批重试会重复处理同一页区间，用 start_page 做键天然去重），
+        -- 再由 composePriorRecap 派生顶层文本，所有既有读取点无需改动。
+        local snapshot = Storage.loadPriorRecap(book) or {}
+        local segments = type(snapshot.batches) == "table" and snapshot.batches or {}
+        local segment = {
+          start_page = batch.start_page,
+          end_page = batch.end_page,
+          display = tostring(data.display or data.resume or ""),
+          resume = tostring(data.resume or data.display or ""),
+          created_at = os.time(),
+        }
+        -- 结构化字段随片段一起留存（当前无读取方，先保证信息不丢）
+        for key, value in pairs(data) do
+          if key ~= "display" and key ~= "resume" then segment[key] = value end
+        end
+        -- 页范围与时间戳以插件记录为准，避免被模型返回里的同名字段覆盖
+        segment.start_page = batch.start_page
+        segment.end_page = batch.end_page
+        segment.created_at = os.time()
+        local replaced = false
+        for index, seg in ipairs(segments) do
+          if tonumber(seg.start_page) == tonumber(segment.start_page) then
+            segments[index] = segment
+            replaced = true
+            break
+          end
+        end
+        if not replaced then table.insert(segments, segment) end
+
+        final_data = Storage.composePriorRecap(snapshot, segments, {
+          status = "in_progress",
+          start_page = 1,
+          end_page = range.end_page,
+          last_batch_start_page = batch.start_page,
+          last_batch_end_page = batch.end_page,
+          next_page = batch.next_page,
+          batch_no = batch_no,
+        })
         Storage.savePriorRecap(book, final_data)
+        -- 交给下一批的"此前档案" = 拼接后的完整文本
+        previous_text = tostring(final_data.display or "")
+
+        -- v1.2.8 轻量观测：本批产出规模 vs 本批原文长度，便于实机判断模型是否遵守"只写新增"。
+        pcall(function()
+          require("logger").info("[KOAI] 前序补档第 " .. tostring(batch_no)
+            .. " 批（第 " .. tostring(batch.start_page) .. "-" .. tostring(batch.end_page) .. " 页）"
+            .. " 本批原文=" .. tostring(#tostring(batch.text or ""))
+            .. " 本批输出=" .. tostring(#tostring(data.display or ""))
+            .. " 累计输出=" .. tostring(#tostring(final_data.display or ""))
+            .. " 片段数=" .. tostring(#segments))
+        end)
 
         start_page = tonumber(batch.next_page) or (batch.end_page + 1)
         if batch.has_more then UIManager:nextTick(nextBatch) else finish() end
       end,
-      {max_tokens = tonumber(config.response_max_tokens) or 8192, temperature = 0.18},
+      {thinking = { type = "disabled" }, max_tokens = tonumber(config.response_max_tokens) or 8192, temperature = 0.18},
       function(message)
         UIManager:show(InfoMessage:new {
           text = "前序补档在第 " .. tostring(batch_no) .. " 批中断：" .. tostring(message)
@@ -1128,18 +1181,30 @@ function Logic.exportArchive(ui)
 end
 
 function Logic.showResumePrompt(ui)
+  -- 阈值与文案动态对齐 configuration.resume_after_hours（不再写死"10小时"，
+  -- ≥24h 以"天"表述，2026-09-27 阈值改一周后文案同步）。
+  local CONFIGURATION = require("configuration")
+  local hours = tonumber(CONFIGURATION.resume_after_hours) or 168
+  local gap_text
+  if hours >= 24 then
+    local days = math.floor(hours / 24)
+    gap_text = (hours % 24 == 0) and string.format("超过%d天未读", days)
+        or string.format("超过%d天多未读", days)
+  else
+    gap_text = string.format("超过%d小时未读", hours)
+  end
   local book = Storage.getBookInfo(ui)
   local recap = Storage.loadLatestRecap(book)
   if recap then
     UIManager:show(ConfirmBox:new {
-      text = "这本书已超过10小时未读。是否先查看前情回顾？",
+      text = "这本书已" .. gap_text .. "。是否先查看前情回顾？",
       ok_text = "查看回顾",
       cancel_text = "直接阅读",
       ok_callback = function() Logic.showResume(ui) end,
     })
   else
     UIManager:show(ConfirmBox:new {
-      text = "这本书已超过10小时未读，但还没有本地复盘。是否查看本次新增内容数量并生成回顾？",
+      text = "这本书已" .. gap_text .. "，但还没有本地复盘。是否查看本次新增内容数量并生成回顾？",
       ok_text = "查看并生成",
       cancel_text = "直接阅读",
       ok_callback = function() Logic.generateChapterRecap(ui) end,
